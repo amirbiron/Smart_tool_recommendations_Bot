@@ -2,7 +2,6 @@ import os
 import logging
 import json
 import threading
-import re
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
 
@@ -66,14 +65,8 @@ def load_tools():
 
 tools_db = load_tools()
 
-# ==============================================================================
-# ===== פונקציה משודרגת וסופית לטיפול ב-JSON =====
-# ==============================================================================
+# --- Groq API Integration ---
 def get_keywords_from_groq(user_text: str) -> list:
-    """
-    Sends user's request to Groq API to extract relevant keywords.
-    This version forces the model to return a structured JSON object.
-    """
     try:
         if not GROQ_API_KEY:
             logger.error("GROQ_API_KEY environment variable not set.")
@@ -94,17 +87,15 @@ def get_keywords_from_groq(user_text: str) -> list:
             model="llama3-8b-8192",
             temperature=0.1,
             max_tokens=100,
-            # נכפה על המודל להחזיר אובייקט JSON
             response_format={"type": "json_object"},
         )
         
         response_content = chat_completion.choices[0].message.content
         logger.info(f"Raw JSON object from Groq: {response_content}")
 
-        # נפענח את אובייקט ה-JSON ונחלץ את הרשימה
         try:
             data = json.loads(response_content)
-            keywords = data.get("keywords", []) # .get בטוח יותר, מחזיר [] אם המפתח לא קיים
+            keywords = data.get("keywords", [])
             if isinstance(keywords, list):
                 return keywords
             else:
@@ -117,7 +108,6 @@ def get_keywords_from_groq(user_text: str) -> list:
     except Exception as e:
         logger.error(f"Error calling Groq API: {e}")
         return []
-# ==============================================================================
 
 # --- Search Logic ---
 def find_tools(keywords: list) -> list:
@@ -257,11 +247,20 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"Bot is alive")
 
+# ==============================================================================
+# ===== פונקציה מתוקנת שקוראת את הפורט מ-Render =====
+# ==============================================================================
 def run_keep_alive_server():
-    server_address = ('', 8080)
+    """Starts the keep-alive server on the port specified by Render."""
+    # Render provides the port to bind to in the PORT environment variable.
+    # Default to 8080 for local development.
+    port = int(os.environ.get("PORT", 8080))
+    server_address = ('', port)
     httpd = HTTPServer(server_address, KeepAliveHandler)
-    logger.info("Keep-alive server started on port 8080")
+    logger.info(f"Keep-alive server started on port {port}")
     httpd.serve_forever()
+# ==============================================================================
+
 
 # --- Main Application Setup ---
 def main() -> None:
@@ -292,4 +291,4 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 ```
-פשוט החלף את תוכן הקובץ `main.py` שלך בקוד החדש הזה והעלה אותו מחדש ל-GitHub. רנדר יבצע פריסה אוטומטית, והבוט אמור לעבוד בצורה יציבה ואמינה הרבה יו
+פשוט החלף את תוכן קובץ `main.py` שלך בקוד החדש הזה והעלה אותו ל-GitHub. זה אמור לפתור את הבעיה באופן סופי. אחרי שהפריסה תסתיים, תראה ש-UptimeRobot יציג סטטוס "U
