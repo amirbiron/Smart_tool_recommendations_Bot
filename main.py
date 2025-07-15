@@ -2,6 +2,7 @@ import os
 import logging
 import json
 import threading
+import re
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
 
@@ -40,7 +41,6 @@ try:
         logger.warning("MONGO_URI not set. User stats feature will be disabled.")
     else:
         client = MongoClient(MONGO_URI)
-        # The ismaster command is cheap and does not require auth.
         client.admin.command('ismaster')
         db = client.smart_tools_bot_db
         logger.info("Successfully connected to MongoDB.")
@@ -57,7 +57,6 @@ CHOOSE_ACTION, GET_RECOMMENDATION_INPUT, GET_KEYWORD_SEARCH_INPUT = range(3)
 
 # --- Load Tools Data ---
 def load_tools():
-    """Loads the tools database from a JSON file."""
     try:
         with open('tools.json', 'r', encoding='utf-8') as f:
             return json.load(f)
@@ -67,9 +66,14 @@ def load_tools():
 
 tools_db = load_tools()
 
-# --- Groq API Integration ---
+# ==============================================================================
+# ===== פונקציה משודרגת וסופית לטיפול ב-JSON =====
+# ==============================================================================
 def get_keywords_from_groq(user_text: str) -> list:
-    """Sends user's request to Groq API to extract relevant keywords."""
+    """
+    Sends user's request to Groq API to extract relevant keywords.
+    This version forces the model to return a structured JSON object.
+    """
     try:
         if not GROQ_API_KEY:
             logger.error("GROQ_API_KEY environment variable not set.")
@@ -80,7 +84,7 @@ def get_keywords_from_groq(user_text: str) -> list:
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a helpful assistant. Your task is to extract relevant keywords from the user's request for a tool. Respond ONLY with a JSON array of 3-5 Hebrew keywords. For example, for 'אני צריך משהו לכתוב ולארגן רעיונות', your response should be '[\"כתיבה\", \"ארגון\", \"רעיונות\", \"פרודוקטיביות\"]'. Do not add any other text.",
+                    "content": "You are an expert in keyword extraction. Your task is to extract relevant keywords from the user's request for a tool. Respond ONLY with a valid JSON object in the format: {\"keywords\": [\"keyword1\", \"keyword2\", \"keyword3\"]}. Do not add any other text, greetings, or markdown formatting.",
                 },
                 {
                     "role": "user",
@@ -88,31 +92,35 @@ def get_keywords_from_groq(user_text: str) -> list:
                 },
             ],
             model="llama3-8b-8192",
-            temperature=0.2,
+            temperature=0.1,
             max_tokens=100,
+            # נכפה על המודל להחזיר אובייקט JSON
             response_format={"type": "json_object"},
         )
         
         response_content = chat_completion.choices[0].message.content
-        response_data = json.loads(response_content)
-        
-        if isinstance(response_data, dict):
-            for key, value in response_data.items():
-                if isinstance(value, list):
-                    return value
-        elif isinstance(response_data, list):
-            return response_data
-            
-        logger.warning(f"Groq returned unexpected JSON structure: {response_content}")
-        return []
+        logger.info(f"Raw JSON object from Groq: {response_content}")
+
+        # נפענח את אובייקט ה-JSON ונחלץ את הרשימה
+        try:
+            data = json.loads(response_content)
+            keywords = data.get("keywords", []) # .get בטוח יותר, מחזיר [] אם המפתח לא קיים
+            if isinstance(keywords, list):
+                return keywords
+            else:
+                logger.warning(f"Value for 'keywords' is not a list: {keywords}")
+                return []
+        except (json.JSONDecodeError, AttributeError) as e:
+            logger.error(f"Failed to decode JSON or get keywords: {e}")
+            return []
 
     except Exception as e:
         logger.error(f"Error calling Groq API: {e}")
         return []
+# ==============================================================================
 
 # --- Search Logic ---
 def find_tools(keywords: list) -> list:
-    """Finds tools in the database that match the given keywords."""
     if not keywords or not tools_db: return []
     scores = {tool['name']: 0 for tool in tools_db}
     for tool in tools_db:
@@ -126,7 +134,6 @@ def find_tools(keywords: list) -> list:
     return sorted_tools[:3]
 
 def search_by_keyword(keyword: str) -> list:
-    """Directly searches for a tool by a single keyword."""
     if not keyword or not tools_db: return []
     keyword = keyword.lower()
     matched_tools = [
@@ -138,11 +145,8 @@ def search_by_keyword(keyword: str) -> list:
 
 # --- Bot Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Starts the conversation, saves the user, and shows the main menu."""
     user = update.message.from_user
     logger.info(f"User {user.first_name} (ID: {user.id}) started the bot.")
-
-    # --- MongoDB: Save User ---
     if db:
         try:
             users_collection = db.users
@@ -165,7 +169,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return CHOOSE_ACTION
 
 async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the user's choice from the main menu."""
     user_choice = update.message.text
     if user_choice == "🧠 המלצה חכמה":
         await update.message.reply_text(
@@ -187,7 +190,6 @@ async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return CHOOSE_ACTION
 
 async def get_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Gets user input, finds tools via Groq, and returns them."""
     user_text = update.message.text
     await update.message.reply_text("קיבלתי. בודק לך מול המאגר החכם... 🤖")
     keywords = get_keywords_from_groq(user_text)
@@ -206,7 +208,6 @@ async def get_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return await start(update, context)
 
 async def keyword_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Searches for tools based on a single keyword."""
     keyword = update.message.text
     await update.message.reply_text(f"מחפש כלים עם המילה '{keyword}'...")
     matched_tools = search_by_keyword(keyword)
@@ -220,7 +221,6 @@ async def keyword_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return await start(update, context)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Displays a help message."""
     await update.message.reply_text(
         "***איך משתמשים בבוט?***\n\n"
         "🔹 **המלצה חכמה**: תאר לי מה אתה צריך, ואני אשתמש בבינה מלאכותית כדי למצוא את הכלים המתאימים ביותר.\n\n"
@@ -231,7 +231,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     return await start(update, context)
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin command to get user count."""
     user_id = str(update.message.from_user.id)
     if not ADMIN_ID or user_id != ADMIN_ID:
         logger.warning(f"Unauthorized stats access attempt by user {user_id}.")
@@ -247,7 +246,6 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         logger.error(f"Error fetching stats from MongoDB: {e}")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Cancels and ends the conversation."""
     await update.message.reply_text("הפעולה בוטלה. חוזרים לתפריט הראשי.", reply_markup=ReplyKeyboardRemove())
     return await start(update, context)
 
@@ -267,7 +265,6 @@ def run_keep_alive_server():
 
 # --- Main Application Setup ---
 def main() -> None:
-    """Run the bot."""
     if not BOT_TOKEN:
         logger.critical("BOT_TOKEN environment variable not set. Exiting.")
         return
@@ -288,9 +285,11 @@ def main() -> None:
     )
 
     application.add_handler(conv_handler)
-    application.add_handler(CommandHandler("stats", stats_command)) # Add the new stats command
+    application.add_handler(CommandHandler("stats", stats_command))
     
     application.run_polling()
 
 if __name__ == "__main__":
     main()
+```
+פשוט החלף את תוכן הקובץ `main.py` שלך בקוד החדש הזה והעלה אותו מחדש ל-GitHub. רנדר יבצע פריסה אוטומטית, והבוט אמור לעבוד בצורה יציבה ואמינה הרבה יו
