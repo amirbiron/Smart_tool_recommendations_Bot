@@ -2,9 +2,12 @@ import os
 import logging
 import json
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
 
+# --- New Imports ---
+from flask import Flask
+
+# --- Telegram and DB Imports ---
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application,
@@ -65,52 +68,60 @@ def load_tools():
 
 tools_db = load_tools()
 
-# --- Groq API Integration ---
+# --- Groq API Functions ---
 def get_keywords_from_groq(user_text: str) -> list:
+    """Extracts keywords from user text for local search."""
     try:
-        if not GROQ_API_KEY:
-            logger.error("GROQ_API_KEY environment variable not set.")
-            return []
-
+        if not GROQ_API_KEY: return []
         client = Groq(api_key=GROQ_API_KEY)
         chat_completion = client.chat.completions.create(
             messages=[
                 {
                     "role": "system",
-                    "content": "You are an expert in keyword extraction. Your task is to extract relevant keywords from the user's request for a tool. Respond ONLY with a valid JSON object in the format: {\"keywords\": [\"keyword1\", \"keyword2\", \"keyword3\"]}. Do not add any other text, greetings, or markdown formatting.",
+                    "content": "You are an expert in keyword extraction. Respond ONLY with a valid JSON object: {\"keywords\": [\"keyword1\", \"keyword2\"]}.",
                 },
-                {
-                    "role": "user",
-                    "content": user_text,
-                },
+                {"role": "user", "content": user_text},
             ],
             model="llama3-8b-8192",
-            temperature=0.1,
-            max_tokens=100,
+            temperature=0.1, max_tokens=100,
             response_format={"type": "json_object"},
         )
-        
         response_content = chat_completion.choices[0].message.content
-        logger.info(f"Raw JSON object from Groq: {response_content}")
-
-        try:
-            data = json.loads(response_content)
-            keywords = data.get("keywords", [])
-            if isinstance(keywords, list):
-                return keywords
-            else:
-                logger.warning(f"Value for 'keywords' is not a list: {keywords}")
-                return []
-        except (json.JSONDecodeError, AttributeError) as e:
-            logger.error(f"Failed to decode JSON or get keywords: {e}")
-            return []
-
+        data = json.loads(response_content)
+        return data.get("keywords", [])
     except Exception as e:
-        logger.error(f"Error calling Groq API: {e}")
+        logger.error(f"Error in get_keywords_from_groq: {e}")
+        return []
+
+def get_web_recommendation_from_groq(user_text: str) -> list:
+    """If local search fails, this function asks Groq to search the web."""
+    logger.info(f"Performing web search for: {user_text}")
+    try:
+        if not GROQ_API_KEY: return []
+        client = Groq(api_key=GROQ_API_KEY)
+        chat_completion = client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful tech expert. The user is looking for a tool. Based on their request, recommend 1-2 tools from your knowledge base. Respond ONLY with a valid JSON object in the format: {\"recommendations\": [{\"name\": \"ToolName\", \"description\": \"...\", \"url\": \"...\"}]}. If you can't find anything, return an empty list.",
+                },
+                {"role": "user", "content": user_text},
+            ],
+            model="llama3-70b-8192",
+            temperature=0.3, max_tokens=500,
+            response_format={"type": "json_object"},
+        )
+        response_content = chat_completion.choices[0].message.content
+        logger.info(f"Web search response from Groq: {response_content}")
+        data = json.loads(response_content)
+        return data.get("recommendations", [])
+    except Exception as e:
+        logger.error(f"Error in get_web_recommendation_from_groq: {e}")
         return []
 
 # --- Search Logic ---
-def find_tools(keywords: list) -> list:
+def find_tools_in_db(keywords: list) -> list:
+    """Finds tools in the local JSON database."""
     if not keywords or not tools_db: return []
     scores = {tool['name']: 0 for tool in tools_db}
     for tool in tools_db:
@@ -137,12 +148,9 @@ def search_by_keyword(keyword: str) -> list:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.message.from_user
     logger.info(f"User {user.first_name} (ID: {user.id}) started the bot.")
-    
-    # === התיקון כאן ===
     if db is not None:
         try:
-            users_collection = db.users
-            users_collection.update_one(
+            db.users.update_one(
                 {'_id': user.id},
                 {'$setOnInsert': {'first_name': user.first_name, 'username': user.username}},
                 upsert=True
@@ -164,14 +172,13 @@ async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     user_choice = update.message.text
     if user_choice == "🧠 המלצה חכמה":
         await update.message.reply_text(
-            "מעולה! תאר לי במילים שלך איזה כלי אתה מחפש.\n"
-            "לדוגמה: 'אני צריך כלי פשוט לארגן רעיונות וכתיבה אישית'",
+            "מעולה! תאר לי במילים שלך איזה כלי אתה מחפש...",
             reply_markup=ReplyKeyboardRemove(),
         )
         return GET_RECOMMENDATION_INPUT
     elif user_choice == "🔍 חיפוש מהיר":
         await update.message.reply_text(
-            "בטח, הקלד מילת מפתח לחיפוש (למשל: 'וידאו', 'אוטומציה', 'Notion').",
+            "בטח, הקלד מילת מפתח לחיפוש...",
             reply_markup=ReplyKeyboardRemove(),
         )
         return GET_KEYWORD_SEARCH_INPUT
@@ -183,21 +190,38 @@ async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 async def get_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_text = update.message.text
-    await update.message.reply_text("קיבלתי. בודק לך מול המאגר החכם... 🤖")
+    await update.message.reply_text("קיבלתי. מבצע חיפוש חכם... 🤖")
     keywords = get_keywords_from_groq(user_text)
-    if not keywords:
-        await update.message.reply_text("מצטער, לא הצלחתי להבין את הבקשה. אולי ננסח מחדש?")
-        return await start(update, context)
-    logger.info(f"Groq keywords for '{user_text}': {keywords}")
-    recommended_tools = find_tools(keywords)
-    if not recommended_tools:
-        await update.message.reply_text("לא מצאתי כלי שמתאים בדיוק לבקשה שלך במאגר שלי.")
-    else:
-        message = "✨ מצאתי כמה כלים שיכולים להתאים לך:\n\n"
+    recommended_tools = []
+    if keywords:
+        logger.info(f"Local search keywords for '{user_text}': {keywords}")
+        recommended_tools = find_tools_in_db(keywords)
+
+    if recommended_tools:
+        message = "✨ מצאתי כמה כלים מהמאגר המאומת שלי שמתאימים לך:\n\n"
         for tool in recommended_tools:
             message += f"🧠 ***{tool['name']}***\n*{tool['description']}*\n🔗 [קישור לכלי]({tool['url']})\n\n"
         await update.message.reply_text(message, parse_mode='Markdown')
+    else:
+        logger.info("No tools found in local DB. Falling back to web search.")
+        await update.message.reply_text("לא מצאתי התאמה במאגר שלי, מבצע חיפוש רחב יותר ברשת...")
+        web_tools = get_web_recommendation_from_groq(user_text)
+        if web_tools:
+            message = "🌐 מצאתי ברשת כמה המלצות נוספות:\n\n"
+            for tool in web_tools:
+                message += f"💡 ***{tool.get('name', 'N/A')}***\n"
+                message += f"*{tool.get('description', 'No description available.')}*\n"
+                url = tool.get('url')
+                if url:
+                    message += f"🔗 [קישור לכלי]({url})\n\n"
+                else:
+                    message += "\n"
+            await update.message.reply_text(message, parse_mode='Markdown')
+        else:
+            await update.message.reply_text("מצטער, חיפשתי גם במאגר שלי וגם ברשת ולא מצאתי כלי מתאים לבקשה שלך.")
+
     return await start(update, context)
+
 
 async def keyword_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     keyword = update.message.text
@@ -215,8 +239,8 @@ async def keyword_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         "***איך משתמשים בבוט?***\n\n"
-        "🔹 **המלצה חכמה**: תאר לי מה אתה צריך, ואני אשתמש בבינה מלאכותית כדי למצוא את הכלים המתאימים ביותר.\n\n"
-        "🔹 **חיפוש מהיר**: הקלד מילת מפתח ואציג לך את כל הכלים הרלוונטיים.\n\n"
+        "🔹 **המלצה חכמה**: תאר לי מה אתה צריך, ואני אחפש במאגר שלי. אם לא אמצא, אחפש גם ברשת.\n\n"
+        "🔹 **חיפוש מהיר**: הקלד מילת מפתח לחיפוש מהיר במאגר המקומי.\n\n"
         "בכל שלב, אפשר להתחיל מחדש עם הפקודה /start.",
         parse_mode='Markdown'
     )
@@ -227,8 +251,6 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not ADMIN_ID or user_id != ADMIN_ID:
         logger.warning(f"Unauthorized stats access attempt by user {user_id}.")
         return
-    
-    # === וגם כאן ===
     if db is None:
         await update.message.reply_text("חיבור ל-MongoDB לא הוגדר.")
         return
@@ -243,33 +265,36 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("הפעולה בוטלה. חוזרים לתפריט הראשי.", reply_markup=ReplyKeyboardRemove())
     return await start(update, context)
 
-# --- Keep-Alive Server ---
-class KeepAliveHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b"Bot is alive")
+# ==============================================================================
+# ===== Keep-Alive Server using Flask (Robust Method) =====
+# ==============================================================================
+flask_app = Flask(__name__)
 
-def run_keep_alive_server():
-    try:
-        port = int(os.environ.get("PORT", 8080))
-        server_address = ('', port)
-        httpd = HTTPServer(server_address, KeepAliveHandler)
-        logger.info(f"Keep-alive server starting on port {port}...")
-        httpd.serve_forever()
-    except Exception as e:
-        logger.critical(f"!!! Keep-alive server failed to start: {e}", exc_info=True)
+@flask_app.route('/')
+def health_check():
+    """This route is called by UptimeRobot to keep the service alive."""
+    return "Bot is alive and kicking!"
+
+def run_flask_app():
+    """Runs the Flask app in a separate thread."""
+    port = int(os.environ.get("PORT", 8080))
+    # Use '0.0.0.0' to make sure the app is accessible from outside the container
+    flask_app.run(host='0.0.0.0', port=port)
+
+# ==============================================================================
 
 # --- Main Application Setup ---
 def main() -> None:
+    """Starts the Flask app and the Telegram bot."""
     if not BOT_TOKEN:
         logger.critical("BOT_TOKEN environment variable not set. Exiting.")
         return
 
-    keep_alive_thread = threading.Thread(target=run_keep_alive_server, daemon=True)
+    # Start the Flask app in a background thread
+    keep_alive_thread = threading.Thread(target=run_flask_app, daemon=True)
     keep_alive_thread.start()
     
+    # Start the Telegram bot
     application = Application.builder().token(BOT_TOKEN).build()
 
     conv_handler = ConversationHandler(
@@ -285,6 +310,7 @@ def main() -> None:
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler("stats", stats_command))
     
+    logger.info("Starting Telegram bot polling...")
     application.run_polling()
 
 if __name__ == "__main__":
