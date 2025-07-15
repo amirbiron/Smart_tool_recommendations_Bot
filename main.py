@@ -36,13 +36,13 @@ ADMIN_ID = os.getenv("ADMIN_ID")
 # --- MongoDB Connection ---
 db = None
 try:
-    if not MONGO_URI:
-        logger.warning("MONGO_URI not set. User stats feature will be disabled.")
-    else:
+    if MONGO_URI:
         client = MongoClient(MONGO_URI)
         client.admin.command('ismaster')
         db = client.smart_tools_bot_db
         logger.info("Successfully connected to MongoDB.")
+    else:
+        logger.warning("MONGO_URI not set. User stats feature will be disabled.")
 except ConnectionFailure as e:
     logger.error(f"Could not connect to MongoDB: {e}")
     db = None
@@ -137,7 +137,9 @@ def search_by_keyword(keyword: str) -> list:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.message.from_user
     logger.info(f"User {user.first_name} (ID: {user.id}) started the bot.")
-    if db:
+    
+    # === התיקון כאן ===
+    if db is not None:
         try:
             users_collection = db.users
             users_collection.update_one(
@@ -225,7 +227,9 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not ADMIN_ID or user_id != ADMIN_ID:
         logger.warning(f"Unauthorized stats access attempt by user {user_id}.")
         return
-    if not db:
+    
+    # === וגם כאן ===
+    if db is None:
         await update.message.reply_text("חיבור ל-MongoDB לא הוגדר.")
         return
     try:
@@ -247,20 +251,15 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"Bot is alive")
 
-# ==============================================================================
-# ===== פונקציה מתוקנת שקוראת את הפורט מ-Render =====
-# ==============================================================================
 def run_keep_alive_server():
-    """Starts the keep-alive server on the port specified by Render."""
-    # Render provides the port to bind to in the PORT environment variable.
-    # Default to 8080 for local development.
-    port = int(os.environ.get("PORT", 8080))
-    server_address = ('', port)
-    httpd = HTTPServer(server_address, KeepAliveHandler)
-    logger.info(f"Keep-alive server started on port {port}")
-    httpd.serve_forever()
-# ==============================================================================
-
+    try:
+        port = int(os.environ.get("PORT", 8080))
+        server_address = ('', port)
+        httpd = HTTPServer(server_address, KeepAliveHandler)
+        logger.info(f"Keep-alive server starting on port {port}...")
+        httpd.serve_forever()
+    except Exception as e:
+        logger.critical(f"!!! Keep-alive server failed to start: {e}", exc_info=True)
 
 # --- Main Application Setup ---
 def main() -> None:
