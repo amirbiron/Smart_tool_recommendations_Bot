@@ -4,8 +4,6 @@
 
 ---
 
-## 📋 שלבי התקנה
-
 ### שלב 1: השגת מפתחות API ו-ID
 
 הבוט זקוק למספר מפתחות סודיים כדי לפעול. נגדיר אותם כמשתני סביבה ב-Render.
@@ -19,24 +17,15 @@
     * שמור את המפתח.
 
 3.  **Admin Telegram ID**:
-    * כדי להשתמש בפקודת האדמין `/stats`, הבוט צריך לדעת מה ה-ID שלך.
     * פנה בטלגרם לבוט `@userinfobot` והוא יציג לך את ה-ID שלך. שמור אותו.
 
-### שלב 1.5: הגדרת MongoDB (אופציונלי, לסטטיסטיקות)
+### שלב 1.5: הגדרת בסיס נתונים (אופציונלי, לסטטיסטיקות)
 
 1.  **צור חשבון חינמי** ב-[MongoDB Atlas](https://www.mongodb.com/cloud/atlas/register).
-2.  **צור קלאסטר (Cluster)** חינמי. בחר בספק ענן ואזור הקרובים אליך (למשל, AWS בפרנקפורט).
-3.  **צור משתמש לבסיס הנתונים**:
-    * בתפריט הצד, לך ל-`Database Access`.
-    * צור משתמש חדש עם שם וסיסמה. שמור את הפרטים.
-4.  **אפשר גישה מכל מקום**:
-    * בתפריט הצד, לך ל-`Network Access`.
-    * לחץ על `Add IP Address` ובחר `Allow Access from Anywhere`. זה הכי פשוט עבור Render.
-5.  **קבל את כתובת ההתחברות (Connection String)**:
-    * חזור למסך הראשי (Databases), לחץ על `Connect` ליד הקלאסטר שלך.
-    * בחר `Drivers`.
-    * העתק את ה-**Connection String** שמופיעה. היא תיראה דומה לזה: `mongodb+srv://<username>:<password>@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority`
-    * **חשוב:** החלף את `<username>` ו-`<password>` בפרטי המשתמש שיצרת בשלב 3.
+2.  **צור קלאסטר (Cluster)** חינמי.
+3.  **צור משתמש לבסיס הנתונים** ושמור את פרטיו.
+4.  **אפשר גישה מכל מקום** (`Allow Access from Anywhere`).
+5.  **העתק את כתובת ההתחברות (Connection String)** והחלף בה את שם המשתמש והסיסמה.
 
 ### שלב 2: העלאת הפרויקט ל-GitHub
 
@@ -59,10 +48,18 @@
 
 5.  לחץ על **Create New Web Service**.
 
-### שלב 4: הגדרת Keep-Alive עם UptimeRobot
+### שלב 4: הגדרת Keep-Alive
 
-1.  העתק את כתובת ה-URL של השירות שלך מ-Render (`https://your-service-name.onrender.com`).
-2.  ב-**UptimeRobot**, צור **New Monitor** מסוג `HTTP(s)`.
+1.  העתק את כתובת ה-URL של השירות שלך מ-Render.
+2.  ב-[UptimeRobot](https://uptimerobot.com/), צור **New Monitor** מסוג `HTTP(s)`.
 3.  הדבק את ה-URL והגדר את **Monitoring Interval** ל-`Every 5 minutes`.
 
-**זהו! הבוט שלך באוויר, עם יכולות משופרות!** 🎉
+---
+
+### 🌐 שירותים חיצוניים
+
+הבוט מסתמך על מספר שירותים חיצוניים כדי לפעול:
+* **[Render](https://render.com/):** פלטפורמת הענן שמריצה את הבוט 24/7.
+* **[Groq](https://groq.com/):** מספקת את מודל השפה המהיר להבנת בקשות המשתמשים.
+* **[MongoDB Atlas](https://www.mongodb.com/cloud/atlas):** בסיס הנתונים שבו נשמרים פרטי המשתמשים לסטטיסטיקה.
+* **[UptimeRobot](https://uptimerobot.com/):** שירות הניטור ששומר על הבוט "ער" ומונע ממנו להירדם.
