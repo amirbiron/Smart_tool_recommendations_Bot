@@ -1,5 +1,5 @@
-# Step 1: Install necessary libraries
-!pip install sentence-transformers faiss-cpu
+# Step 1: Install necessary libraries (Run this in a separate, first cell)
+# !pip install sentence-transformers faiss-cpu
 
 # Step 2: Import libraries
 import json
@@ -9,8 +9,6 @@ import faiss
 from sentence_transformers import SentenceTransformer
 
 # Step 3: Define file paths
-# Note: We are running this in Colab, so we don't need a persistent data path.
-# The files will be created in the current temporary directory.
 TOOLS_JSON_PATH = 'tools.json'
 FAISS_INDEX_PATH = 'tools.faiss'
 MAPPING_PATH = 'index_to_name.json'
@@ -22,7 +20,6 @@ def create_and_save_embeddings():
     """
     print("Starting embedding creation process...")
     
-    # Ensure tools.json exists
     if not os.path.exists(TOOLS_JSON_PATH):
         print(f"Error: {TOOLS_JSON_PATH} not found.")
         print("Please upload your 'tools.json' file to the Colab session using the file browser on the left.")
@@ -36,7 +33,6 @@ def create_and_save_embeddings():
         print(f"Error reading or parsing {TOOLS_JSON_PATH}: {e}")
         return
 
-    # Prepare the text for each tool for embedding
     texts_to_embed = [f"שם: {t.get('name', '')}. קטגוריה: {t.get('category', '')}. תיאור: {t.get('description', '')}" for t in tools]
     tool_names = [t['name'] for t in tools]
 
@@ -47,7 +43,6 @@ def create_and_save_embeddings():
     embeddings = model.encode(texts_to_embed, show_progress_bar=True)
     embeddings = np.array(embeddings).astype('float32')
     
-    # Create and populate the Faiss index
     index = faiss.IndexFlatL2(embeddings.shape[1])
     index.add(embeddings)
 
