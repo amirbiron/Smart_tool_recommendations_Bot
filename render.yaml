@@ -16,7 +16,7 @@ services:
     disks:
       - name: bot-data-disk
         mountPath: /var/data
-        sizeGB: 2 # Increased size as per your screenshot
+        sizeGB: 2
 
   # The one-time worker to build the index
   - type: worker
@@ -28,7 +28,10 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.4
+      - fromSecretFile: # The worker also needs the secrets
+          name: .env
+          path: .env
     disks:
       - name: bot-data-disk
         mountPath: /var/data
-        sizeGB: 2 # Increased size as per your screenshot
+        sizeGB: 2
