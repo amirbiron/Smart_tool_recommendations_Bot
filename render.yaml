@@ -16,4 +16,19 @@ services:
     disks:
       - name: bot-data-disk
         mountPath: /var/data
-        sizeGB: 2
+        sizeGB: 2 # Increased size as per your screenshot
+
+  # The one-time worker to build the index
+  - type: worker
+    name: build-index-worker
+    env: python
+    plan: starter # Use a paid plan to ensure enough memory
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python create_embeddings.py"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.4
+    disks:
+      - name: bot-data-disk
+        mountPath: /var/data
+        sizeGB: 2 # Increased size as per your screenshot
