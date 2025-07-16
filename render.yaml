@@ -1,37 +1,35 @@
 services:
-  # The main bot that talks to users
-  - type: web
-    name: smart-tools-bot
+  - name: smart-tools-bot
+    type: web
     env: python
-    plan: starter # Or any paid plan
+    plan: starter
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python main.py"
     healthCheckPath: /
+    disks:
+      - name: bot-data-disk
+        mountPath: /var/data
+        sizeGB: 2
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.4
       - fromSecretFile:
           name: .env
           path: .env
+
+  - name: build-index-worker
+    type: worker
+    env: python
+    plan: starter
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python create_embeddings.py"
     disks:
       - name: bot-data-disk
         mountPath: /var/data
-        sizeGB: 1
-
-  # The one-time worker to build the index
-  - type: worker
-    name: build-index-worker
-    env: python
-    plan: starter # Use a paid plan to ensure enough memory
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "python create_embeddings.py"
+        sizeGB: 2
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.4
-      - fromSecretFile: # The worker also needs the secrets
+      - fromSecretFile:
           name: .env
           path: .env
-    disks:
-      - name: bot-data-disk
-        mountPath: /var/data
-        sizeGB: 1
