@@ -62,14 +62,11 @@ def load_tools():
 tools_db = load_tools()
 tools_db_string = json.dumps(tools_db, ensure_ascii=False)
 
-# ==============================================================================
-# ===== New Query Optimization Function =====
-# ==============================================================================
 def optimize_query_for_search(user_query: str) -> str:
     """Uses Groq to convert a user's natural language query into an optimal search term."""
     logger.info(f"Optimizing query: {user_query}")
     try:
-        if not GROQ_API_KEY: return user_query # Fallback to original query
+        if not GROQ_API_KEY: return user_query 
         client = Groq(api_key=GROQ_API_KEY)
         chat_completion = client.chat.completions.create(
             messages=[
@@ -79,7 +76,7 @@ def optimize_query_for_search(user_query: str) -> str:
                 },
                 {"role": "user", "content": user_query},
             ],
-            model="llama3-8b-8192", # A small, fast model is enough for this
+            model="llama3-8b-8192",
             temperature=0.0,
             max_tokens=50,
         )
@@ -88,11 +85,11 @@ def optimize_query_for_search(user_query: str) -> str:
         return optimized_query
     except Exception as e:
         logger.error(f"Error optimizing search query: {e}")
-        return user_query # Fallback to original query on error
+        return user_query
 
 def perform_live_web_search(query: str) -> list:
-    """Performs a live search across the entire web."""
-    logger.info(f"Performing live web search for: {query}")
+    """Performs a live, targeted search within allitools.dev."""
+    logger.info(f"Performing targeted live web search for: {query}")
     if not GOOGLE_SEARCH_API_KEY or not CUSTOM_SEARCH_ENGINE_ID:
         logger.error("Google Search API Key or CX not provided.")
         return []
@@ -102,7 +99,9 @@ def perform_live_web_search(query: str) -> list:
         'key': GOOGLE_SEARCH_API_KEY,
         'cx': CUSTOM_SEARCH_ENGINE_ID,
         'q': query,
-        'num': 5
+        'num': 5,
+        'siteSearch': 'allaitools.dev', # The targeted site
+        'siteSearchFilter': 'i'
     }
     try:
         response = requests.get(url, params=params)
@@ -115,20 +114,20 @@ def perform_live_web_search(query: str) -> list:
 
 def summarize_search_results(results: list, original_query: str) -> str:
     if not results:
-        return "לא נמצאו תוצאות רלוונטיות בחיפוש."
+        return "לא נמצאו תוצאות רלוונטיות בחיפוש הממוקד."
     snippets = [f"Title: {item.get('title', '')}\nSnippet: {item.get('snippet', '')}\nLink: {item.get('link', '')}" for item in results]
     context_str = "\n\n---\n\n".join(snippets)
     logger.info("Sending search results to Groq for semantic summarization.")
     try:
         client = Groq(api_key=GROQ_API_KEY)
         system_prompt = (
-            "You are a helpful tech expert who communicates in Hebrew. You will be given a user's original query and a list of Google search results. "
+            "You are a helpful tech expert who communicates in Hebrew. You will be given a user's original query and a list of Google search results from the website 'allaitools.dev'. "
             "Your task is to first understand the user's need from their query. Then, analyze the search results to find the most relevant tool(s) that answer that need. "
             "Summarize the best 1-2 tool recommendations based ONLY on the provided search results. For each tool, provide its name and a short description in Hebrew. "
             "If the results are not relevant to the original query, state 'לא הצלחתי למצוא המלצה מתאימה בתוצאות החיפוש.'"
         )
         user_prompt = (
-            f"Original user query: '{original_query}'\n\nSearch Results:\n{context_str}"
+            f"Original user query: '{original_query}'\n\nSearch Results from allaitools.dev:\n{context_str}"
         )
         chat_completion = client.chat.completions.create(
             messages=[
@@ -260,9 +259,9 @@ async def get_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         await update.message.reply_text("לא מצאתי התאמה טובה במאגר שלי.")
     
-    reply_keyboard = [["🌐 חפש באינטרנט"], ["🏠 חזרה לתפריט הראשי"]]
+    reply_keyboard = [["🌐 חפש ב-allaitools.dev"], ["🏠 חזרה לתפריט הראשי"]]
     await update.message.reply_text(
-        "תרצה שאבצע חיפוש עדכני ורחב יותר באינטרנט?",
+        "תרצה שאבצע חיפוש ממוקד במאגר הכלים של allaitools.dev?",
         reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True)
     )
     
@@ -270,13 +269,13 @@ async def get_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def web_search_prompt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     choice = update.message.text
-    if choice == "🌐 חפש באינטרנט":
+    if choice == "🌐 חפש ב-allaitools.dev":
         last_query = context.user_data.get('last_query', '')
         if not last_query:
             await update.message.reply_text("אירעה שגיאה, לא זוכר מה חיפשנו. נחזור לתפריט הראשי.", reply_markup=ReplyKeyboardRemove())
             return await start(update, context)
 
-        await update.message.reply_text("מבצע אופטימיזציה לשאילתה ומחפש באינטרנט...", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text("מבצע אופטימיזציה לשאילתה ומחפש במאגר החיצוני...", reply_markup=ReplyKeyboardRemove())
         
         optimized_query = optimize_query_for_search(last_query)
         search_results = perform_live_web_search(optimized_query)
@@ -298,9 +297,9 @@ async def keyword_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         for tool in matched_tools:
             await send_tool_recommendation(update, context, tool)
 
-    reply_keyboard = [["🌐 חפש באינטרנט"], ["🏠 חזרה לתפריט הראשי"]]
+    reply_keyboard = [["🌐 חפש ב-allaitools.dev"], ["🏠 חזרה לתפריט הראשי"]]
     await update.message.reply_text(
-        "תרצה שאבצע חיפוש עדכני ורחב יותר באינטרנט?",
+        "תרצה שאבצע חיפוש ממוקד במאגר הכלים של allaitools.dev?",
         reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True)
     )
 
@@ -344,7 +343,7 @@ def main() -> None:
             GET_RECOMMENDATION_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_recommendation)],
             GET_KEYWORD_SEARCH_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, keyword_search)],
             WEB_SEARCH_PROMPT: [
-                MessageHandler(filters.Regex("^🌐 חפש באינטרנט$"), web_search_prompt_handler),
+                MessageHandler(filters.Regex("^🌐 חפש ב-allaitools.dev$"), web_search_prompt_handler),
                 MessageHandler(filters.Regex("^🏠 חזרה לתפריט הראשי$"), start),
             ]
         },
