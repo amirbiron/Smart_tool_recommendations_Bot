@@ -1,162 +1,204 @@
 #!/usr/bin/env python3
-# main.py — Telegram AI-tools bot (original flow)
-
-import json, logging, os, threading
-from typing import Any
-
-import faiss, numpy as np
+import os, logging, json, threading
 from dotenv import load_dotenv
-from flask import Flask
-from groq import Groq
+import requests
+import numpy as np
+import faiss
 from sentence_transformers import SentenceTransformer
-from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
-                      ReplyKeyboardRemove, Update)
-from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
-                          ContextTypes, ConversationHandler, MessageHandler,
-                          filters)
 
-# ── Logging
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-                    level=logging.INFO)
-logger = logging.getLogger("bot")
+from flask import Flask
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    ReplyKeyboardRemove
+)
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, filters,
+    ContextTypes, ConversationHandler, CallbackQueryHandler
+)
+from groq import Groq
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure
+
+load_dotenv()
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 # ── Environment
-load_dotenv()
 BOT_TOKEN    = os.getenv("BOT_TOKEN")
 ADMIN_ID     = os.getenv("ADMIN_ID")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+MONGO_URI    = os.getenv("MONGO_URI")          # optional
 
-DATA_PATH = os.getenv("INDEX_DIR", "/var/data")
+# ── Paths
+DATA_PATH        = os.getenv("INDEX_DIR", "/var/data")
 TOOLS_JSON_PATH  = "tools.json"
 FAISS_INDEX_PATH = os.path.join(DATA_PATH, "tools.faiss")
 MAPPING_PATH     = os.path.join(DATA_PATH, "index_to_name.json")
 
 # ── Globals
-TOOLS_DB: list[dict[str, Any]] = []
-VECTOR_INDEX: faiss.Index | None = None
-INDEX_TO_NAME: dict[int, str] = {}
-EMBED_MODEL: SentenceTransformer | None = None
+tools_db: list[dict] = []
+vector_index = None
+index_to_name: dict[int, str] = {}
+embedding_model = None
 
+# Conversation states
 CHOOSE_ACTION, GET_RECOMMEND_INPUT = range(2)
 
-# ── Load resources
+# ──────────────────────────────────────────
+# Loading resources
 def load_all_data() -> None:
-    global TOOLS_DB, VECTOR_INDEX, INDEX_TO_NAME, EMBED_MODEL
+    global tools_db, vector_index, index_to_name, embedding_model
     try:
         with open(TOOLS_JSON_PATH, encoding="utf-8") as f:
-            TOOLS_DB = json.load(f)
-        VECTOR_INDEX = faiss.read_index(FAISS_INDEX_PATH)
+            tools_db = json.load(f)
+
+        vector_index = faiss.read_index(FAISS_INDEX_PATH)
+
         with open(MAPPING_PATH, encoding="utf-8") as f:
-            INDEX_TO_NAME = {int(k): v for k, v in json.load(f).items()}
-        EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+            raw = json.load(f)
+            index_to_name = {int(k): v for k, v in raw.items()}
+
+        embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
         logger.info("Resources loaded ✅")
-    except Exception as exc:
-        logger.critical("FATAL: Could not load resources: %s", exc)
-        VECTOR_INDEX = None
+    except Exception as e:
+        logger.critical(
+            "FATAL: Could not load resources (%s). "
+            "Run the one-off job to create them.", e
+        )
+        vector_index = None  # disable search
 
-# ── Search helpers
-def vector_search(q: str, k: int = 15):
-    if VECTOR_INDEX is None or EMBED_MODEL is None:
+# ──────────────────────────────────────────
+# Search helpers
+def find_candidates_with_vector_search(q: str, k: int = 15) -> list[dict]:
+    if vector_index is None or embedding_model is None:
         return []
-    emb = EMBED_MODEL.encode([q]).astype("float32")
-    _, idxs = VECTOR_INDEX.search(emb, k)
-    names = {INDEX_TO_NAME.get(i) for i in idxs[0] if i in INDEX_TO_NAME}
-    return [t for t in TOOLS_DB if t.get("name") in names]
+    emb = embedding_model.encode([q]).astype("float32")
+    _, idx = vector_index.search(emb, k)
+    names = {index_to_name.get(str(i)) for i in idx[0]}
+    return [t for t in tools_db if t.get("name") in names]
 
-def rerank(cands, q: str):
+def rerank_semantic(cands: list, q: str) -> list[str]:
     if not cands or not GROQ_API_KEY:
         return []
     client = Groq(api_key=GROQ_API_KEY)
-    sys = "Return JSON {\"best_matches\":[...]}"
+    sys = ("You are a smart recommendation engine. "
+           "Return JSON {\"best_matches\":[...]}.")
     usr = f"User: {q}\nCandidates:\n{json.dumps(cands, ensure_ascii=False)}"
-    resp = client.chat.completions.create(
-        model="llama3-70b-8192",
-        messages=[{"role":"system","content":sys},
-                  {"role":"user","content":usr}],
-        temperature=0.1, max_tokens=200,
-        response_format={"type":"json_object"},
-    )
-    return json.loads(resp.choices[0].message.content).get("best_matches", [])
+    try:
+        resp = client.chat.completions.create(
+            model="llama3-70b-8192",
+            messages=[{"role":"system","content":sys},
+                      {"role":"user","content":usr}],
+            temperature=0.1,
+            max_tokens=200,
+            response_format={"type":"json_object"},
+        )
+        return json.loads(resp.choices[0].message.content).get("best_matches", [])
+    except Exception as e:
+        logger.error("Groq rerank error: %s", e)
+        return []
 
-def find_tool(name: str):
-    return next((t for t in TOOLS_DB if t["name"].lower()==name.lower()), None)
+def find_tool_by_name(name: str):
+    return next((t for t in tools_db if t["name"].lower()==name.lower()), None)
 
-# ── Handlers
-async def start(update: Update, _):
+# ──────────────────────────────────────────
+# Telegram handlers
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
-        "היי! כתוב לי מה אתה מחפש, ואמצא לך את הכלי הכי מתאים 🤖",
-        reply_markup=ReplyKeyboardRemove(),
+        "היי! כתוב לי מה אתה מחפש, ואמצא לך את הכלי המתאים 🤖",
+        reply_markup=ReplyKeyboardRemove()
     )
     return GET_RECOMMEND_INPUT
 
-async def choose_action(update: Update, _):
-    return GET_RECOMMEND_INPUT  # אין מקלדת תפריט, ממשיכים לחיפוש
+async def choose_action(update: Update, _: ContextTypes.DEFAULT_TYPE) -> int:
+    # אין תפריט פעולות – כל קלט נחשב לחיפוש
+    return GET_RECOMMEND_INPUT
 
-async def get_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if VECTOR_INDEX is None:
+async def get_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if vector_index is None:
         await update.message.reply_text("המאגר בתחזוקה. נסה מאוחר יותר.")
         return ConversationHandler.END
 
     q = update.message.text
     await update.message.reply_text("⏳ מחפש…")
-    best = rerank(vector_search(q), q)
 
+    best = rerank_semantic(find_candidates_with_vector_search(q), q)
     if best:
-        await update.message.reply_text("✨ הכלים המתאימים ביותר:")
+        await update.message.reply_text("✨ מצאתי:")
         for n in best:
-            t = find_tool(n)
-            if t:
+            tool = find_tool_by_name(n)
+            if tool:
                 kb = [
                     [InlineKeyboardButton("💰 בדוק מחיר עדכני",
-                                          callback_data=f"price_check:{t['name']}")],
+                                          callback_data=f"price_check:{tool['name']}")],
                     [InlineKeyboardButton("⬅️ חזור",
-                                          callback_data=f"back_to_tool:{t['name']}")]
+                                          callback_data=f"back_to_tool:{tool['name']}")]
                 ]
-                txt = f"🧠 *{t['name']}*\n{t.get('description','')}\n[🔗 קישור]({t.get('url','#')})"
+                txt = (f"🧠 *{tool['name']}*\n"
+                       f"{tool.get('description','')}\n"
+                       f"[🔗 קישור]({tool.get('url','#')})")
                 await context.bot.send_message(
-                    update.effective_chat.id, txt,
-                    parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb)
+                    chat_id=update.effective_chat.id,
+                    text=txt,
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(kb)
                 )
     else:
         await update.message.reply_text("לא מצאתי התאמה 🙁")
+
     return GET_RECOMMEND_INPUT
 
-async def price_check_callback(update: Update, _):
+async def price_check_callback(update: Update, _: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer("Price check coming soon…")
 
-async def back_to_tool_callback(update: Update, _):
+async def back_to_tool_callback(update: Update, _: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.message.reply_text(
-        "מוכן לבקשה חדשה – או /start כדי להתחיל מחדש."
+        "כתוב בקשה חדשה או /start כדי להתחיל מחדש."
     )
 
-async def stats_command(update: Update, _):
+async def stats_command(update: Update, _: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) == ADMIN_ID:
-        await update.message.reply_text(f"Loaded tools: {len(TOOLS_DB)}")
+        await update.message.reply_text(f"Total tools loaded: {len(tools_db)}")
 
-# ── Keep-alive
+# ──────────────────────────────────────────
+# Keep-alive Flask
 flask_app = Flask(__name__)
 @flask_app.route("/")
-def ping(): return "OK"
+def health_check():
+    return "OK"
 
-def run_flask(): flask_app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+def run_flask_app():
+    flask_app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
 
-# ── Main
-def main():
+# ──────────────────────────────────────────
+def main() -> None:
     load_all_data()
     if not BOT_TOKEN:
-        logger.critical("Missing BOT_TOKEN"); return
-    threading.Thread(target=run_flask, daemon=True).start()
+        logger.critical("BOT_TOKEN not set. Exiting.")
+        return
+
+    threading.Thread(target=run_flask_app, daemon=True).start()
 
     app = Application.builder().token(BOT_TOKEN).build()
+
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            CHOOSE_ACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_action)],
-            GET_RECOMMEND_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_recommendation)],
+            CHOOSE_ACTION: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, choose_action)
+            ],
+            GET_RECOMMEND_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_recommendation)
+            ],
         },
         fallbacks=[CommandHandler("start", start)],
     )
+
     app.add_handler(conv)
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CallbackQueryHandler(price_check_callback, pattern=r"^price_check:"))
