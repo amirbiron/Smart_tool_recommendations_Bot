@@ -48,7 +48,7 @@
 ### שלב 4: העלאת הפרויקט ל-GitHub
 
 1.  צור מאגר (repository) חדש בחשבון ה-GitHub שלך.
-2.  העלה את כל קבצי הפרויקט למאגר זה.
+2.  העלה את כל קבצי הפרויקט למאגר זה (`main.py`, `tools.json`, `requirements.txt`, `render.yaml`, וקובץ `README.md` זה).
 
 ### שלב 5: הגדרת הפרויקט ב-Render
 
