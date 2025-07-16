@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 from flask import Flask
 
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -14,6 +14,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
     ConversationHandler,
+    CallbackQueryHandler, # New import for buttons
 )
 from groq import Groq
 from pymongo import MongoClient
@@ -45,7 +46,7 @@ except Exception as e:
     db = None
 
 # States for conversation
-CHOOSE_ACTION, GET_RECOMMENDATION_INPUT, GET_KEYWORD_SEARCH_INPUT, WEB_SEARCH = range(4)
+CHOOSE_ACTION, GET_RECOMMENDATION_INPUT, GET_KEYWORD_SEARCH_INPUT = range(3)
 
 def load_tools():
     try:
@@ -61,6 +62,7 @@ def get_keywords_from_groq(user_text: str) -> list:
     try:
         if not GROQ_API_KEY: return []
         client = Groq(api_key=GROQ_API_KEY)
+        # ... (rest of the function is the same)
         chat_completion = client.chat.completions.create(
             messages=[
                 {"role": "system", "content": "You are an expert in keyword extraction. Respond ONLY with a valid JSON object: {\"keywords\": [\"keyword1\", \"keyword2\"]}. The keywords should be in Hebrew."},
@@ -76,61 +78,79 @@ def get_keywords_from_groq(user_text: str) -> list:
         logger.error(f"Error in get_keywords_from_groq: {e}")
         return []
 
-def get_web_recommendation_from_groq(user_text: str) -> list:
-    logger.info(f"Performing web search for: {user_text}")
+# ==============================================================================
+# ===== פונקציה חדשה לבדיקת מחיר עדכני =====
+# ==============================================================================
+def get_price_from_groq(tool_name: str) -> str:
+    """Gets the current pricing for a specific tool using Groq."""
+    logger.info(f"Fetching price for tool: {tool_name}")
     try:
-        if not GROQ_API_KEY: return []
+        if not GROQ_API_KEY: return "לא ניתן היה לבדוק את המחיר."
         client = Groq(api_key=GROQ_API_KEY)
         chat_completion = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": "You are a helpful tech expert. The user is looking for a tool. Based on their request, recommend 1-2 tools from your knowledge base. Respond ONLY with a valid JSON object in the format: {\"recommendations\": [{\"name\": \"ToolName\", \"description\": \"...\", \"url\": \"...\"}]}. If you can't find anything, return an empty list."},
-                {"role": "user", "content": user_text},
+                {
+                    "role": "system",
+                    "content": f"What is the current basic pricing for the tool '{tool_name}'? Search the web for its official pricing page. Respond with a short, concise answer in Hebrew, for example: 'התוכנית החינמית מוגבלת, תוכניות בתשלום מתחילות ב-$10 לחודש.' or 'הכלי הינו בתשלום בלבד, החל מ-$29 לחודש.'. If you cannot find the price, say 'לא הצלחתי למצוא מחיר עדכני'.",
+                },
             ],
             model="llama3-70b-8192",
-            temperature=0.3, max_tokens=500,
-            response_format={"type": "json_object"},
+            temperature=0.2,
+            max_tokens=100,
         )
-        data = json.loads(chat_completion.choices[0].message.content)
-        return data.get("recommendations", [])
+        return chat_completion.choices[0].message.content
     except Exception as e:
-        logger.error(f"Error in get_web_recommendation_from_groq: {e}")
-        return []
+        logger.error(f"Error fetching price for {tool_name}: {e}")
+        return "אירעה שגיאה בעת בדיקת המחיר."
 
-# ==============================================================================
-# ===== אלגוריתם חיפוש משוקלל ומשופר =====
-# ==============================================================================
 def find_tools_in_db(keywords: list) -> list:
-    """Finds tools in the local JSON database using a weighted scoring system."""
     if not keywords or not tools_db: return []
-    
     scores = {tool['name']: 0 for tool in tools_db}
-    
     for tool in tools_db:
         for keyword in keywords:
             keyword_lower = keyword.lower()
-            # Highest score for category match
-            if 'category' in tool and keyword_lower in tool['category'].lower():
-                scores[tool['name']] += 3
-            # High score for name match
-            if keyword_lower in tool['name'].lower():
-                scores[tool['name']] += 2
-            # Normal score for keyword list match
-            if 'keywords' in tool and any(keyword_lower in k.lower() for k in tool['keywords']):
-                 scores[tool['name']] += 1
-            # Low score for description match
-            if 'description' in tool and keyword_lower in tool['description'].lower():
-                scores[tool['name']] += 0.5
-
+            if 'category' in tool and keyword_lower in tool['category'].lower(): scores[tool['name']] += 3
+            if keyword_lower in tool['name'].lower(): scores[tool['name']] += 2
+            if 'keywords' in tool and any(keyword_lower in k.lower() for k in tool['keywords']): scores[tool['name']] += 1
+            if 'description' in tool and keyword_lower in tool['description'].lower(): scores[tool['name']] += 0.5
     scored_tools = [tool for tool in tools_db if scores[tool['name']] > 0]
-    sorted_tools = sorted(scored_tools, key=lambda t: scores[t['name']], reverse=True)
-    
-    return sorted_tools[:3]
+    return sorted(scored_tools, key=lambda t: scores[t['name']], reverse=True)[:3]
 
 def search_by_keyword(keyword: str) -> list:
     return find_tools_in_db([keyword])
 
+async def send_tool_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE, tool: dict):
+    """Sends a formatted message for a single tool with an inline button."""
+    keyboard = [[
+        InlineKeyboardButton("💰 בדוק מחיר עדכני", callback_data=f"price_check:{tool['name']}")
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    message = f"🧠 ***{tool['name']}***\n"
+    message += f"*{tool.get('description', 'No description available.')}*\n"
+    message += f"🔗 [קישור לכלי]({tool.get('url', '#')})\n"
+    
+    await update.message.reply_text(message, parse_mode='Markdown', reply_markup=reply_markup)
+
+# ==============================================================================
+# ===== מטפל לחיצות כפתור חדש =====
+# ==============================================================================
+async def price_check_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the 'Check Price' button click."""
+    query = update.callback_query
+    await query.answer() # Acknowledge the button press
+    
+    tool_name = query.data.split(':', 1)[1]
+    
+    await query.edit_message_text(text=f"בודק מחיר עדכני עבור *{tool_name}*...", parse_mode='Markdown')
+    
+    price_info = get_price_from_groq(tool_name)
+    
+    await query.edit_message_text(text=f"💰 מידע על תמחור עבור *{tool_name}*:\n\n{price_info}", parse_mode='Markdown')
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # ... (same as before)
     user = update.message.from_user
     logger.info(f"User {user.first_name} (ID: {user.id}) started the bot.")
     if db is not None:
@@ -154,6 +174,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return CHOOSE_ACTION
 
 async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # ... (same as before)
     user_choice = update.message.text
     if user_choice == "🧠 המלצה חכמה":
         await update.message.reply_text("מעולה! תאר לי במילים שלך איזה כלי אתה מחפש...", reply_markup=ReplyKeyboardRemove())
@@ -169,87 +190,50 @@ async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 async def get_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_text = update.message.text
-    context.user_data['last_query'] = user_text # Save query for web search
     await update.message.reply_text("קיבלתי. מבצע חיפוש במאגר המאומת שלי... 🤖")
 
     keywords = get_keywords_from_groq(user_text)
-    recommended_tools = []
-    if keywords:
-        logger.info(f"Local search keywords for '{user_text}': {keywords}")
-        recommended_tools = find_tools_in_db(keywords)
-
-    reply_keyboard = [["🌐 חפש כלים נוספים ברשת"], ["🏠 חזרה לתפריט הראשי"]]
+    recommended_tools = find_tools_in_db(keywords) if keywords else []
 
     if recommended_tools:
-        message = "✨ מצאתי כמה כלים מהמאגר שלי שמתאימים לך:\n\n"
+        await update.message.reply_text("✨ מצאתי כמה כלים מהמאגר שלי שמתאימים לך:")
         for tool in recommended_tools:
-            message += f"🧠 ***{tool['name']}***\n*{tool['description']}*\n🔗 [קישור לכלי]({tool['url']})\n\n"
-        await update.message.reply_text(message, parse_mode='Markdown')
-        await update.message.reply_text("רוצה שאחפש לך המלצות נוספות ברשת?", reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True))
+            await send_tool_recommendation(update, context, tool)
     else:
-        await update.message.reply_text("לא מצאתי התאמה במאגר שלי.", reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True))
-    
-    return WEB_SEARCH
-
-async def web_search_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    last_query = context.user_data.get('last_query', '')
-    if not last_query:
-        await update.message.reply_text("אירעה שגיאה, לא זוכר מה חיפשנו. נחזור לתפריט הראשי.", reply_markup=ReplyKeyboardRemove())
-        return await start(update, context)
-
-    await update.message.reply_text(f"בסדר, מבצע חיפוש רחב יותר ברשת עבור '{last_query}'...", reply_markup=ReplyKeyboardRemove())
-    web_tools = get_web_recommendation_from_groq(last_query)
-    
-    if web_tools:
-        message = "🌐 מצאתי ברשת כמה המלצות נוספות:\n\n"
-        for tool in web_tools:
-            message += f"💡 ***{tool.get('name', 'N/A')}***\n"
-            message += f"*{tool.get('description', 'No description available.')}*\n"
-            url = tool.get('url')
-            if url:
-                message += f"🔗 [קישור לכלי]({url})\n\n"
-            else:
-                message += "\n"
-        await update.message.reply_text(message, parse_mode='Markdown')
-    else:
-        await update.message.reply_text("מצטער, גם החיפוש ברשת לא הניב תוצאות.")
+        await update.message.reply_text("לא מצאתי התאמה במאגר שלי. נסה לנסח מחדש או לבצע חיפוש מהיר.")
     
     return await start(update, context)
 
-
 async def keyword_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     keyword = update.message.text
-    context.user_data['last_query'] = keyword # Save for web search
     await update.message.reply_text(f"מחפש כלים עם המילה '{keyword}' במאגר שלי...")
     
     matched_tools = search_by_keyword(keyword)
-    reply_keyboard = [["🌐 חפש כלים נוספים ברשת"], ["🏠 חזרה לתפריט הראשי"]]
 
     if not matched_tools:
-        await update.message.reply_text("לא מצאתי כלים התואמים למילת המפתח הזו במאגר שלי.", reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True))
+        await update.message.reply_text("לא מצאתי כלים התואמים למילת המפתח הזו במאגר שלי.")
     else:
-        message = f"🔍 תוצאות חיפוש עבור '{keyword}':\n\n"
+        await update.message.reply_text(f"🔍 תוצאות חיפוש עבור '{keyword}':")
         for tool in matched_tools:
-            message += f"***{tool['name']}***\n*{tool['description']}*\n🔗 [קישור לכלי]({tool['url']})\n\n"
-        await update.message.reply_text(message, parse_mode='Markdown')
-        await update.message.reply_text("רוצה שאחפש לך המלצות נוספות ברשת?", reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True))
+            await send_tool_recommendation(update, context, tool)
 
-    return WEB_SEARCH
+    return await start(update, context)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # ... (same as before)
     await update.message.reply_text(
         "***איך משתמשים בבוט?***\n\n"
         "🔹 **המלצה חכמה**: תאר לי מה אתה צריך, ואני אחפש במאגר שלי.\n\n"
         "🔹 **חיפוש מהיר**: הקלד מילת מפתח לחיפוש מהיר במאגר.\n\n"
-        "בכל חיפוש, תוכל לבקש ממני לחפש המלצות נוספות גם ברחבי הרשת.",
+        "לכל המלצה תוכל לבקש בדיקת מחיר עדכנית.",
         parse_mode='Markdown'
     )
     return await start(update, context)
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # ... (same as before)
     user_id = str(update.message.from_user.id)
-    if not ADMIN_ID or user_id != ADMIN_ID:
-        return
+    if not ADMIN_ID or user_id != ADMIN_ID: return
     if db is None:
         await update.message.reply_text("חיבור ל-MongoDB לא הוגדר.")
         return
@@ -260,6 +244,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         logger.error(f"Error fetching stats from MongoDB: {e}")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # ... (same as before)
     await update.message.reply_text("הפעולה בוטלה.", reply_markup=ReplyKeyboardRemove())
     return await start(update, context)
 
@@ -288,16 +273,14 @@ def main() -> None:
             CHOOSE_ACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_action)],
             GET_RECOMMENDATION_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_recommendation)],
             GET_KEYWORD_SEARCH_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, keyword_search)],
-            WEB_SEARCH: [
-                MessageHandler(filters.Regex("^🌐 חפש כלים נוספים ברשת$"), web_search_fallback),
-                MessageHandler(filters.Regex("^🏠 חזרה לתפריט הראשי$"), start),
-            ]
         },
         fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)],
     )
 
     application.add_handler(conv_handler)
-    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(stats_command)
+    # Add the new button handler
+    application.add_handler(CallbackQueryHandler(price_check_callback, pattern=r"^price_check:"))
     
     logger.info("Starting Telegram bot polling...")
     application.run_polling()
