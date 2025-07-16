@@ -4,6 +4,9 @@ import json
 import threading
 from dotenv import load_dotenv
 import requests
+import numpy as np
+import faiss
+from sentence_transformers import SentenceTransformer
 
 from flask import Flask
 
@@ -49,112 +52,80 @@ except Exception as e:
     logger.error(f"An error occurred with MongoDB setup: {e}")
     db = None
 
-CHOOSE_ACTION, GET_RECOMMENDATION_INPUT, GET_KEYWORD_SEARCH_INPUT, WEB_SEARCH_PROMPT = range(4)
+CHOOSE_ACTION, GET_RECOMMENDATION_INPUT = range(2)
 
-def load_tools():
+# --- Load all necessary data on startup ---
+def load_all_data():
     try:
+        logger.info("Loading tools.json...")
         with open('tools.json', 'r', encoding='utf-8') as f:
-            return json.load(f)
+            tools_db = json.load(f)
+        
+        logger.info("Loading Faiss index (tools.faiss)...")
+        vector_index = faiss.read_index('tools.faiss')
+
+        logger.info("Loading index-to-name mapping...")
+        with open('index_to_name.json', 'r', encoding='utf-8') as f:
+            index_to_name = json.load(f)
+            # JSON saves keys as strings, convert them back to int
+            index_to_name = {int(k): v for k, v in index_to_name.items()}
+
+        logger.info("Loading SentenceTransformer model...")
+        embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+        
+        logger.info("All data loaded successfully.")
+        return tools_db, vector_index, index_to_name, embedding_model
     except Exception as e:
-        logger.error(f"Error loading tools.json: {e}")
-        return []
+        logger.critical(f"FATAL: Could not load essential data files: {e}")
+        logger.critical("Please run 'create_embeddings.py' first.")
+        return None, None, None, None
 
-tools_db = load_tools()
-tools_db_string = json.dumps(tools_db, ensure_ascii=False)
+tools_db, vector_index, index_to_name, embedding_model = load_all_data()
 
-def optimize_query_for_search(user_query: str) -> str:
-    """Uses Groq to convert a user's natural language query into an optimal search term."""
-    logger.info(f"Optimizing query: {user_query}")
-    try:
-        if not GROQ_API_KEY: return user_query 
-        client = Groq(api_key=GROQ_API_KEY)
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a search engine optimization expert. Your task is to convert the following user's request into the best possible, concise English search term to find relevant software tools. Respond only with the search term itself, without any extra text.",
-                },
-                {"role": "user", "content": user_query},
-            ],
-            model="llama3-8b-8192",
-            temperature=0.0,
-            max_tokens=50,
-        )
-        optimized_query = chat_completion.choices[0].message.content.strip().replace("\"", "")
-        logger.info(f"Optimized query: {optimized_query}")
-        return optimized_query
-    except Exception as e:
-        logger.error(f"Error optimizing search query: {e}")
-        return user_query
+# ==============================================================================
+# ===== Vector Search + Reranking Architecture =====
+# ==============================================================================
 
-def perform_live_web_search(query: str) -> list:
-    """Performs a live, targeted search within allitools.dev."""
-    logger.info(f"Performing targeted live web search for: {query}")
-    if not GOOGLE_SEARCH_API_KEY or not CUSTOM_SEARCH_ENGINE_ID:
-        logger.error("Google Search API Key or CX not provided.")
+def find_candidates_with_vector_search(user_query: str, k=15) -> list:
+    """
+    Step 1: Use vector search to find the top-k most similar tools.
+    """
+    if vector_index is None or embedding_model is None:
         return []
     
-    url = "https://www.googleapis.com/customsearch/v1"
-    params = {
-        'key': GOOGLE_SEARCH_API_KEY,
-        'cx': CUSTOM_SEARCH_ENGINE_ID,
-        'q': query,
-        'num': 5,
-        'siteSearch': 'allaitools.dev', # The targeted site
-        'siteSearchFilter': 'i'
-    }
-    try:
-        response = requests.get(url, params=params)
-        response.raise_for_status()
-        search_results = response.json()
-        return search_results.get('items', [])
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error calling Google Search API: {e}")
+    logger.info(f"Creating embedding for query: '{user_query}'")
+    query_embedding = embedding_model.encode([user_query])
+    query_embedding = np.array(query_embedding).astype('float32')
+    
+    logger.info(f"Searching Faiss index for top {k} candidates...")
+    distances, indices = vector_index.search(query_embedding, k)
+    
+    candidate_names = [index_to_name[i] for i in indices[0]]
+    candidate_tools = [tool for tool in tools_db if tool['name'] in candidate_names]
+    
+    logger.info(f"Found {len(candidate_tools)} candidates via vector search.")
+    return candidate_tools
+
+def rerank_candidates_semantically(candidates: list, user_query: str) -> list:
+    """
+    Step 2: Sends the candidate list to Groq for semantic reranking.
+    """
+    if not candidates:
         return []
 
-def summarize_search_results(results: list, original_query: str) -> str:
-    if not results:
-        return "לא נמצאו תוצאות רלוונטיות בחיפוש הממוקד."
-    snippets = [f"Title: {item.get('title', '')}\nSnippet: {item.get('snippet', '')}\nLink: {item.get('link', '')}" for item in results]
-    context_str = "\n\n---\n\n".join(snippets)
-    logger.info("Sending search results to Groq for semantic summarization.")
-    try:
-        client = Groq(api_key=GROQ_API_KEY)
-        system_prompt = (
-            "You are a helpful tech expert who communicates in Hebrew. You will be given a user's original query and a list of Google search results from the website 'allaitools.dev'. "
-            "Your task is to first understand the user's need from their query. Then, analyze the search results to find the most relevant tool(s) that answer that need. "
-            "Summarize the best 1-2 tool recommendations based ONLY on the provided search results. For each tool, provide its name and a short description in Hebrew. "
-            "If the results are not relevant to the original query, state 'לא הצלחתי למצוא המלצה מתאימה בתוצאות החיפוש.'"
-        )
-        user_prompt = (
-            f"Original user query: '{original_query}'\n\nSearch Results from allaitools.dev:\n{context_str}"
-        )
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            model="llama3-70b-8192",
-            temperature=0.3, max_tokens=500,
-        )
-        return chat_completion.choices[0].message.content
-    except Exception as e:
-        logger.error(f"Error summarizing search results with Groq: {e}")
-        return "אירעה שגיאה בעת סיכום תוצאות החיפוש."
-
-def get_semantic_recommendation(user_text: str) -> list:
-    logger.info("Performing semantic search on local DB...")
+    logger.info("Performing semantic reranking on candidates...")
+    candidates_string = json.dumps(candidates, ensure_ascii=False)
     try:
         if not GROQ_API_KEY: return []
         client = Groq(api_key=GROQ_API_KEY)
         system_prompt = (
-            "You are a smart assistant. Your task is to analyze the user's request and find the best matching tools from a provided JSON list. "
-            "Return a JSON object with a single key, 'best_matches', containing a list of the names of the top 1-3 most relevant tools. "
-            "If no tools are relevant, return an empty list."
+            "You are a smart recommendation engine. Your task is to analyze the user's request and find the best matching tools from a pre-filtered list of candidates. "
+            "Return a JSON object with a single key, 'best_matches', containing a list of the names of the top 1-3 most relevant tools from the candidate list. "
+            "If no tools are a good match, return an empty list."
         )
         user_prompt = (
-            f"User's request: \"{user_text}\"\n\n"
-            f"Here is the list of available tools in JSON format:\n{tools_db_string}"
+            f"User's request: \"{user_query}\"\n\n"
+            f"Here is the pre-filtered list of candidate tools:\n{candidates_string}"
         )
         chat_completion = client.chat.completions.create(
             messages=[
@@ -165,13 +136,17 @@ def get_semantic_recommendation(user_text: str) -> list:
             temperature=0.1, max_tokens=200,
             response_format={"type": "json_object"},
         )
-        data = json.loads(chat_completion.choices[0].message.content)
+        response_content = chat_completion.choices[0].message.content
+        logger.info(f"Semantic reranking response from Groq: {response_content}")
+        data = json.loads(response_content)
         return data.get("best_matches", [])
     except Exception as e:
-        logger.error(f"Error in get_semantic_recommendation: {e}")
+        logger.error(f"Error in rerank_candidates_semantically: {e}")
         return []
 
+# --- Other functions (Price Check, etc.) ---
 def get_price_from_groq(tool_name: str) -> str:
+    # ... (code remains the same)
     logger.info(f"Fetching price for tool: {tool_name}")
     try:
         if not GROQ_API_KEY: return "לא ניתן היה לבדוק את המחיר."
@@ -189,18 +164,21 @@ def get_price_from_groq(tool_name: str) -> str:
         return "אירעה שגיאה בעת בדיקת המחיר."
 
 def find_tool_by_name(name: str) -> dict | None:
+    # ... (code remains the same)
     for tool in tools_db:
         if tool['name'].lower() == name.lower():
             return tool
     return None
 
 async def send_tool_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE, tool: dict):
+    # ... (code remains the same)
     keyboard = [[InlineKeyboardButton("💰 בדוק מחיר עדכני", callback_data=f"price_check:{tool['name']}")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     message_text = f"🧠 ***{tool['name']}***\n*{tool.get('description', 'No description available.')}*\n🔗 [קישור לכלי]({tool.get('url', '#')})\n"
     await context.bot.send_message(chat_id=update.effective_chat.id, text=message_text, parse_mode='Markdown', reply_markup=reply_markup)
 
 async def price_check_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # ... (code remains the same)
     query = update.callback_query
     await query.answer()
     tool_name = query.data.split(':', 1)[1]
@@ -212,6 +190,7 @@ async def price_check_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text(text=f"💰 מידע על תמחור עבור *{tool_name}*:\n\n{price_info}", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def back_to_tool_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # ... (code remains the same)
     query = update.callback_query
     await query.answer()
     tool_name = query.data.split(':', 1)[1]
@@ -222,6 +201,7 @@ async def back_to_tool_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(text="אירעה שגיאה. לא נמצא המידע המקורי.")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # ... (code remains the same)
     user = update.message.from_user
     logger.info(f"User {user.first_name} (ID: {user.id}) started the bot.")
     if db is not None:
@@ -229,26 +209,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             db.users.update_one({'_id': user.id}, {'$setOnInsert': {'first_name': user.first_name, 'username': user.username}}, upsert=True)
         except Exception as e:
             logger.error(f"Failed to save user {user.id} to MongoDB: {e}")
-    reply_keyboard = [["🧠 המלצה חכמה"], ["🔍 חיפוש מהיר"]]
+    reply_keyboard = [["🧠 המלצה חכמה"]]
     await update.message.reply_text("👋 שלום!\nאני בוט המלצות חכם. תאר לי מה אתה צריך ואמצא לך את הכלי המתאים ביותר.", reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True))
     return CHOOSE_ACTION
 
 async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # ... (code remains the same)
     user_choice = update.message.text
     if user_choice == "🧠 המלצה חכמה":
         await update.message.reply_text("מעולה! תאר לי במילים שלך, כמה שיותר בפירוט, איזה כלי אתה מחפש...", reply_markup=ReplyKeyboardRemove())
         return GET_RECOMMENDATION_INPUT
-    elif user_choice == "🔍 חיפוש מהיר":
-        await update.message.reply_text("בטח, הקלד מילת מפתח אחת לחיפוש מהיר...", reply_markup=ReplyKeyboardRemove())
-        return GET_KEYWORD_SEARCH_INPUT
     return CHOOSE_ACTION
 
 async def get_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_text = update.message.text
-    context.user_data['last_query'] = user_text
-    await update.message.reply_text("קיבלתי. מנתח את הבקשה שלך מול המאגר שלי... 🤖")
+    await update.message.reply_text("קיבלתי. מבצע חיפוש סמנטי במאגר... 🤖")
     
-    recommended_tool_names = get_semantic_recommendation(user_text)
+    # Step 1: Find candidates using vector search
+    candidate_tools = find_candidates_with_vector_search(user_text)
+    
+    # Step 2: Rerank candidates with a powerful LLM
+    recommended_tool_names = rerank_candidates_semantically(candidate_tools, user_text)
     
     if recommended_tool_names:
         await update.message.reply_text("✨ אלו הכלים שמצאתי שהכי מתאימים לבקשה שלך:")
@@ -257,55 +238,12 @@ async def get_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if tool:
                 await send_tool_recommendation(update, context, tool)
     else:
-        await update.message.reply_text("לא מצאתי התאמה טובה במאגר שלי.")
+        await update.message.reply_text("מצטער, לא מצאתי התאמה טובה במאגר שלי. אולי נסה לנסח את הבקשה קצת אחרת?")
     
-    reply_keyboard = [["🌐 חפש ב-allaitools.dev"], ["🏠 חזרה לתפריט הראשי"]]
-    await update.message.reply_text(
-        "תרצה שאבצע חיפוש ממוקד במאגר הכלים של allaitools.dev?",
-        reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True)
-    )
-    
-    return WEB_SEARCH_PROMPT
-
-async def web_search_prompt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    choice = update.message.text
-    if choice == "🌐 חפש ב-allaitools.dev":
-        last_query = context.user_data.get('last_query', '')
-        if not last_query:
-            await update.message.reply_text("אירעה שגיאה, לא זוכר מה חיפשנו. נחזור לתפריט הראשי.", reply_markup=ReplyKeyboardRemove())
-            return await start(update, context)
-
-        await update.message.reply_text("מבצע אופטימיזציה לשאילתה ומחפש במאגר החיצוני...", reply_markup=ReplyKeyboardRemove())
-        
-        optimized_query = optimize_query_for_search(last_query)
-        search_results = perform_live_web_search(optimized_query)
-        summary = summarize_search_results(search_results, last_query)
-        
-        await update.message.reply_text(summary)
-        
     return await start(update, context)
 
-async def keyword_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    keyword = update.message.text
-    context.user_data['last_query'] = keyword
-    await update.message.reply_text(f"מחפש כלים עם המילה '{keyword}' במאגר שלי...")
-    matched_tools = find_tools_in_db([keyword])
-    if not matched_tools:
-        await update.message.reply_text("לא מצאתי כלים התואמים למילת המפתח הזו במאגר שלי.")
-    else:
-        await update.message.reply_text(f"🔍 תוצאות חיפוש עבור '{keyword}':")
-        for tool in matched_tools:
-            await send_tool_recommendation(update, context, tool)
-
-    reply_keyboard = [["🌐 חפש ב-allaitools.dev"], ["🏠 חזרה לתפריט הראשי"]]
-    await update.message.reply_text(
-        "תרצה שאבצע חיפוש ממוקד במאגר הכלים של allaitools.dev?",
-        reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True)
-    )
-
-    return WEB_SEARCH_PROMPT
-
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # ... (code remains the same)
     user_id = str(update.message.from_user.id)
     if not ADMIN_ID or user_id != ADMIN_ID: return
     if db is None:
@@ -317,6 +255,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except Exception as e:
         logger.error(f"Error fetching stats from MongoDB: {e}")
 
+# --- Flask and Main App Setup (remains the same) ---
 flask_app = Flask(__name__)
 @flask_app.route('/')
 def health_check():
@@ -327,6 +266,10 @@ def run_flask_app():
     flask_app.run(host='0.0.0.0', port=port)
 
 def main() -> None:
+    if not all([tools_db, vector_index, index_to_name, embedding_model]):
+        logger.critical("Bot cannot start due to missing data files. Exiting.")
+        return
+        
     if not BOT_TOKEN:
         logger.critical("BOT_TOKEN environment variable not set. Exiting.")
         return
@@ -341,11 +284,6 @@ def main() -> None:
         states={
             CHOOSE_ACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_action)],
             GET_RECOMMENDATION_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_recommendation)],
-            GET_KEYWORD_SEARCH_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, keyword_search)],
-            WEB_SEARCH_PROMPT: [
-                MessageHandler(filters.Regex("^🌐 חפש ב-allaitools.dev$"), web_search_prompt_handler),
-                MessageHandler(filters.Regex("^🏠 חזרה לתפריט הראשי$"), start),
-            ]
         },
         fallbacks=[CommandHandler("start", start)],
     )
