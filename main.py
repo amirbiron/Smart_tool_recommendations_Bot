@@ -47,7 +47,7 @@ MAPPING_PATH = os.path.join(DATA_PATH, 'index_to_name.json')
 tools_db = []
 vector_index = None
 index_to_name = {}
-embedding_model = None # Will be loaded on demand
+embedding_model = None
 
 # ==============================================================================
 # ===== Cloud-Based Index Creation Functionality =====
@@ -62,11 +62,17 @@ def create_and_save_embeddings(tools_file, index_file, mapping_file):
         logger.error(f"Error: {tools_file} not found.")
         return False, "tools.json not found."
 
+    # === התיקון כאן: ודא שהתיקייה קיימת לפני הכתיבה ===
+    try:
+        os.makedirs(DATA_PATH, exist_ok=True)
+    except OSError as e:
+        logger.error(f"Could not create data directory {DATA_PATH}: {e}")
+        return False, f"Permission error creating directory: {e}"
+
     texts_to_embed = [f"שם: {t.get('name', '')}. קטגוריה: {t.get('category', '')}. תיאור: {t.get('description', '')}" for t in tools]
     tool_names = [t['name'] for t in tools]
 
     logger.info("Loading sentence-transformer model (on-demand)...")
-    # Load model only when needed to save memory on startup
     temp_embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
     logger.info(f"Creating embeddings for {len(texts_to_embed)} tools...")
@@ -84,26 +90,21 @@ def create_and_save_embeddings(tools_file, index_file, mapping_file):
     with open(mapping_file, 'w', encoding='utf-8') as f:
         json.dump(temp_index_to_name, f, ensure_ascii=False, indent=2)
 
-    logger.info("Embedding creation complete. Model unloaded from memory.")
+    logger.info("Embedding creation complete.")
     return True, f"Index rebuilt successfully with {len(tools)} tools."
 
 async def rebuild_index_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin command to rebuild the Faiss index."""
     user_id = str(update.message.from_user.id)
     if not ADMIN_ID or user_id != ADMIN_ID:
-        logger.warning(f"Unauthorized /rebuild_index attempt by user {user_id}.")
         return
 
     await update.message.reply_text("מתחיל בתהליך בניית האינדקס מחדש. זה עשוי לקחת מספר דקות, אנא המתן...")
     
-    # Run the CPU-intensive task in a separate thread to not block the bot
     def rebuild_task():
         success, message = create_and_save_embeddings(TOOLS_JSON_PATH, FAISS_INDEX_PATH, MAPPING_PATH)
         
-        # After the task is done, send a message back to the user
         async def send_result():
             if success:
-                # Reload data into memory after successful rebuild
                 load_all_data()
                 await context.bot.send_message(chat_id=update.effective_chat.id, text=f"✅ הצלחה! {message}\nהבוט משתמש כעת במאגר המעודכן.")
             else:
@@ -113,39 +114,31 @@ async def rebuild_index_command(update: Update, context: ContextTypes.DEFAULT_TY
 
     threading.Thread(target=rebuild_task).start()
 
-# --- Load all necessary data on startup ---
 def load_all_data():
-    global tools_db, vector_index, index_to_name, embedding_model
+    global tools_db, vector_index, index_to_name
     try:
-        logger.info("Loading tools.json...")
         with open(TOOLS_JSON_PATH, 'r', encoding='utf-8') as f:
             tools_db = json.load(f)
         
-        logger.info(f"Loading Faiss index from {FAISS_INDEX_PATH}...")
         vector_index = faiss.read_index(FAISS_INDEX_PATH)
 
-        logger.info(f"Loading index-to-name mapping from {MAPPING_PATH}...")
         with open(MAPPING_PATH, 'r', encoding='utf-8') as f:
             index_to_name = json.load(f)
             index_to_name = {int(k): v for k, v in index_to_name.items()}
-
-        logger.info("Essential data loaded. Embedding model will be loaded on demand.")
+        
+        logger.info("All data loaded successfully.")
     except Exception as e:
         logger.warning(f"Could not load data files: {e}. The bot might not function correctly.")
         logger.warning("Use the /rebuild_index command as admin to create the necessary files.")
+        vector_index = None # Ensure it's None if loading fails
     
-    # Ensure embedding model is not loaded at startup
-    embedding_model = None
-
 def get_embedding_model():
-    """Loads the embedding model if it's not already loaded."""
     global embedding_model
     if embedding_model is None:
         logger.info("Loading SentenceTransformer model (on-demand)...")
         embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
     return embedding_model
 
-# --- Main Bot Logic ---
 def find_candidates_with_vector_search(user_query: str, k=15) -> list:
     if vector_index is None:
         logger.error("Vector index not loaded. Cannot perform search.")
@@ -157,7 +150,7 @@ def find_candidates_with_vector_search(user_query: str, k=15) -> list:
     
     try:
         _, indices = vector_index.search(query_embedding, k)
-        candidate_names = [index_to_name.get(i) for i in indices[0] if i in index_to_name]
+        candidate_names = [index_to_name.get(str(i)) for i in indices[0]] # Keys from JSON are strings
         return [tool for tool in tools_db if tool['name'] in candidate_names]
     except Exception as e:
         logger.error(f"Error during Faiss search: {e}")
@@ -183,7 +176,7 @@ def rerank_candidates_semantically(candidates: list, user_query: str) -> list:
 
 async def get_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not vector_index:
-        await update.message.reply_text("מצטער, המאגר שלי עדיין לא מוכן. אנא בקש ממנהל הבוט להפעיל את פקודת ההכנה.")
+        await update.message.reply_text("מצטער, המאגר שלי עדיין לא מוכן. אנא בקש ממנהל הבוט להפעיל את פקודת ההכנה (`/rebuild_index`).")
         return await start(update, context)
 
     user_text = update.message.text
@@ -203,9 +196,25 @@ async def get_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     return await start(update, context)
 
-# ... (Other handlers like start, choose_action, price_check, etc., remain the same)
-# For brevity, I will only include the main structure and the modified functions.
-# The user needs the full runnable code.
+# --- Other handlers and main setup ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user = update.message.from_user
+    logger.info(f"User {user.first_name} (ID: {user.id}) started the bot.")
+    if db is not None:
+        try:
+            db.users.update_one({'_id': user.id}, {'$setOnInsert': {'first_name': user.first_name, 'username': user.username}}, upsert=True)
+        except Exception as e:
+            logger.error(f"Failed to save user {user.id} to MongoDB: {e}")
+    reply_keyboard = [["🧠 המלצה חכמה"]]
+    await update.message.reply_text("👋 שלום!\nאני בוט המלצות חכם. תאר לי מה אתה צריך ואמצא לך את הכלי המתאים ביותר.", reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True))
+    return CHOOSE_ACTION
+
+async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_choice = update.message.text
+    if user_choice == "🧠 המלצה חכמה":
+        await update.message.reply_text("מעולה! תאר לי במילים שלך, כמה שיותר בפירוט, איזה כלי אתה מחפש...", reply_markup=ReplyKeyboardRemove())
+        return GET_RECOMMENDATION_INPUT
+    return CHOOSE_ACTION
 
 def find_tool_by_name(name: str) -> dict | None:
     for tool in tools_db:
@@ -240,25 +249,6 @@ async def back_to_tool_callback(update: Update, context: ContextTypes.DEFAULT_TY
     else:
         await query.edit_message_text(text="אירעה שגיאה. לא נמצא המידע המקורי.")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.message.from_user
-    logger.info(f"User {user.first_name} (ID: {user.id}) started the bot.")
-    if db is not None:
-        try:
-            db.users.update_one({'_id': user.id}, {'$setOnInsert': {'first_name': user.first_name, 'username': user.username}}, upsert=True)
-        except Exception as e:
-            logger.error(f"Failed to save user {user.id} to MongoDB: {e}")
-    reply_keyboard = [["🧠 המלצה חכמה"]]
-    await update.message.reply_text("👋 שלום!\nאני בוט המלצות חכם. תאר לי מה אתה צריך ואמצא לך את הכלי המתאים ביותר.", reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True))
-    return CHOOSE_ACTION
-
-async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_choice = update.message.text
-    if user_choice == "🧠 המלצה חכמה":
-        await update.message.reply_text("מעולה! תאר לי במילים שלך, כמה שיותר בפירוט, איזה כלי אתה מחפש...", reply_markup=ReplyKeyboardRemove())
-        return GET_RECOMMENDATION_INPUT
-    return CHOOSE_ACTION
-
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = str(update.message.from_user.id)
     if not ADMIN_ID or user_id != ADMIN_ID: return
@@ -281,11 +271,6 @@ def run_flask_app():
     flask_app.run(host='0.0.0.0', port=port)
 
 def main() -> None:
-    # Ensure the data directory exists
-    if not os.path.exists(DATA_PATH):
-        os.makedirs(DATA_PATH)
-        
-    # Load data at the very beginning
     load_all_data()
 
     if not BOT_TOKEN:
