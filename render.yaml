@@ -2,19 +2,19 @@ services:
   - type: web
     name: my-bot
     env: python
-    plan: free
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "python main.py"
+    plan: starter          # ← לא free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
     healthCheckPath: /
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.4
       - key: TELEGRAM_BOT_TOKEN
-        value: ""        # תמלא בדשבורד
+        value: ""   # תמלא בדשבורד
       - key: MONGO_URI
-        value: ""        # תמלא בדשבורד
+        value: ""
       - key: ADMIN_ID
-        value: ""        # תמלא בדשבורד
+        value: ""
     disk:
       name: bot-data-disk
       mountPath: /var/data
@@ -23,19 +23,19 @@ services:
   - type: worker
     name: build-index-worker
     env: python
-    plan: starter        # צריך יותר זיכרון ליצירת embeddings
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "python create_embeddings.py"
+    plan: starter          # כבר היה Starter, משאיר
+    buildCommand: pip install -r requirements.txt
+    startCommand: python create_embeddings.py
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.4
       - key: TELEGRAM_BOT_TOKEN
-        value: ""        # אותו מפתח
+        value: ""
       - key: MONGO_URI
         value: ""
       - key: ADMIN_ID
         value: ""
     disk:
-      name: bot-data-disk
+      name: bot-data-disk   # אפשר אותו דיסק כדי לשתף נתונים
       mountPath: /var/data
       sizeGB: 2
