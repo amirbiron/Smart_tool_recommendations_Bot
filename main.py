@@ -6,7 +6,8 @@ from dotenv import load_dotenv
 
 from flask import Flask
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+# === התיקון כאן ===
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -126,7 +127,6 @@ async def send_tool_recommendation(update: Update, context: ContextTypes.DEFAULT
     message += f"*{tool.get('description', 'No description available.')}*\n"
     message += f"🔗 [קישור לכלי]({tool.get('url', '#')})\n"
     
-    # Using context.bot.send_message for more flexibility
     await context.bot.send_message(chat_id=update.effective_chat.id, text=message, parse_mode='Markdown', reply_markup=reply_markup)
 
 
@@ -268,7 +268,6 @@ def main() -> None:
     )
 
     application.add_handler(conv_handler)
-    # === התיקון כאן ===
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CallbackQueryHandler(price_check_callback, pattern=r"^price_check:"))
     
