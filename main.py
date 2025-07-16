@@ -1,208 +1,172 @@
-import os
-import logging
+#!/usr/bin/env python3
+# main.py – Telegram AI-tools bot
+
 import json
+import logging
+import os
 import threading
-from dotenv import load_dotenv
-import requests
-import numpy as np
+from typing import Any
+
 import faiss
-from sentence_transformers import SentenceTransformer
-
+import numpy as np
+from dotenv import load_dotenv
 from flask import Flask
-
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-    ConversationHandler,
-    CallbackQueryHandler,
-)
 from groq import Groq
-from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure
+from sentence_transformers import SentenceTransformer
+from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
+                      ReplyKeyboardRemove, Update)
+from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
+                          ContextTypes, ConversationHandler, MessageHandler,
+                          filters)
 
-load_dotenv()
-
+# ────────────────── Logging
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("bot")
 
-# --- Environment Variables ---
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = os.getenv("ADMIN_ID")
+# ────────────────── Environment
+load_dotenv()
+BOT_TOKEN   = os.getenv("BOT_TOKEN")
+ADMIN_ID    = os.getenv("ADMIN_ID")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-MONGO_URI = os.getenv("MONGO_URI")
 
-# --- Path for persistent data on Render ---
-DATA_PATH = "/var/data"
-TOOLS_JSON_PATH = 'tools.json' 
-FAISS_INDEX_PATH = os.path.join(DATA_PATH, 'tools.faiss')
-MAPPING_PATH = os.path.join(DATA_PATH, 'index_to_name.json')
+DATA_PATH = os.getenv("INDEX_DIR", "/var/data")
+TOOLS_JSON_PATH  = "tools.json"
+FAISS_INDEX_PATH = os.path.join(DATA_PATH, "tools.faiss")
+MAPPING_PATH     = os.path.join(DATA_PATH, "index_to_name.json")
 
-# --- Global variables for loaded data ---
-tools_db = []
-vector_index = None
-index_to_name = {}
-embedding_model = None
+# ────────────────── Globals
+TOOLS_DB: list[dict[str, Any]] = []
+VECTOR_INDEX: faiss.Index | None = None
+INDEX_TO_NAME: dict[int, str] = {}
+EMBED_MODEL: SentenceTransformer | None = None
 
-# --- Define states for conversation ---
 CHOOSE_ACTION, GET_RECOMMENDATION_INPUT = range(2)
 
-def load_all_data():
-    global tools_db, vector_index, index_to_name, embedding_model
+# ────────────────── Data loading
+def load_all_data() -> None:
+    global TOOLS_DB, VECTOR_INDEX, INDEX_TO_NAME, EMBED_MODEL
     try:
-        logger.info("Loading tools.json...")
-        with open(TOOLS_JSON_PATH, 'r', encoding='utf-8') as f:
-            tools_db = json.load(f)
-        
-        logger.info(f"Loading Faiss index from {FAISS_INDEX_PATH}...")
-        vector_index = faiss.read_index(FAISS_INDEX_PATH)
+        with open(TOOLS_JSON_PATH, "r", encoding="utf-8") as f:
+            TOOLS_DB = json.load(f)
 
-        logger.info(f"Loading index-to-name mapping from {MAPPING_PATH}...")
-        with open(MAPPING_PATH, 'r', encoding='utf-8') as f:
-            index_to_name = json.load(f)
-            index_to_name = {int(k): v for k, v in index_to_name.items()}
-        
-        logger.info("Loading SentenceTransformer model...")
-        embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-        
-        logger.info("All data loaded successfully.")
+        VECTOR_INDEX = faiss.read_index(FAISS_INDEX_PATH)
+
+        with open(MAPPING_PATH, "r", encoding="utf-8") as f:
+            INDEX_TO_NAME = {int(k): v for k, v in json.load(f).items()}
+
+        EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+        logger.info("Resources loaded.")
     except Exception as e:
-        logger.critical(f"FATAL: Could not load essential data files: {e}. Please run the one-off job to create them.")
-        vector_index = None
+        logger.critical("FATAL: Could not load resources: %s", e)
+        VECTOR_INDEX = None
 
-def find_candidates_with_vector_search(user_query: str, k=15) -> list:
-    if vector_index is None or embedding_model is None:
-        logger.error("Vector index or model not loaded. Cannot perform search.")
+# ────────────────── Search helpers
+def find_candidates(query: str, k: int = 15) -> list[dict[str, Any]]:
+    if VECTOR_INDEX is None or EMBED_MODEL is None:
         return []
-    
-    query_embedding = embedding_model.encode([user_query])
-    query_embedding = np.array(query_embedding).astype('float32')
-    
-    try:
-        _, indices = vector_index.search(query_embedding, k)
-        candidate_names = [index_to_name.get(str(i)) for i in indices[0]]
-        return [tool for tool in tools_db if tool and tool.get('name') in candidate_names]
-    except Exception as e:
-        logger.error(f"Error during Faiss search: {e}")
+    emb = EMBED_MODEL.encode([query]).astype("float32")
+    _, idxs = VECTOR_INDEX.search(emb, k)
+    names = {INDEX_TO_NAME.get(i) for i in idxs[0] if i in INDEX_TO_NAME}
+    return [t for t in TOOLS_DB if t.get("name") in names]
+
+def rerank(candidates: list[dict[str, Any]], query: str) -> list[str]:
+    if not candidates or not GROQ_API_KEY:
         return []
+    client = Groq(api_key=GROQ_API_KEY)
+    sys_msg = ("You are a smart recommendation engine. "
+               "Return JSON {\"best_matches\": [\"Tool1\", \"Tool2\"]}.")
+    usr_msg = (f"User request: \"{query}\"\n\nCandidates:\n"
+               f"{json.dumps(candidates, ensure_ascii=False)}")
+    resp = client.chat.completions.create(
+        model="llama3-70b-8192",
+        messages=[{"role": "system", "content": sys_msg},
+                  {"role": "user", "content": usr_msg}],
+        temperature=0.1,
+        max_tokens=200,
+        response_format={"type": "json_object"},
+    )
+    return json.loads(resp.choices[0].message.content).get("best_matches", [])
 
-def rerank_candidates_semantically(candidates: list, user_query: str) -> list:
-    if not candidates: return []
-    candidates_string = json.dumps(candidates, ensure_ascii=False)
-    try:
-        if not GROQ_API_KEY: return []
-        client = Groq(api_key=GROQ_API_KEY)
-        system_prompt = "You are a smart recommendation engine. Analyze the user's request and find the best matching tools from a pre-filtered list of candidates. Return a JSON object: {\"best_matches\": [\"ToolName1\", \"ToolName2\"]}. If no tools are a good match, return an empty list."
-        user_prompt = f"User's request: \"{user_query}\"\n\nCandidate tools:\n{candidates_string}"
-        chat_completion = client.chat.completions.create(
-            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-            model="llama3-70b-8192", temperature=0.1, max_tokens=200, response_format={"type": "json_object"}
-        )
-        data = json.loads(chat_completion.choices[0].message.content)
-        return data.get("best_matches", [])
-    except Exception as e:
-        logger.error(f"Error in rerank_candidates_semantically: {e}")
-        return []
+def find_tool(name: str) -> dict[str, Any] | None:
+    return next((t for t in TOOLS_DB if t.get("name","").lower()==name.lower()), None)
 
-async def get_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not vector_index:
-        await update.message.reply_text("מצטער, המאגר שלי נמצא בתחזוקה. אנא נסה שוב מאוחר יותר.")
-        return await start(update, context)
+# ────────────────── Bot handlers
+async def start(update: Update, _: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "היי! כתוב לי מה אתה מחפש ואמצא לך כלי מתאים ✨",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return GET_RECOMMENDATION_INPUT
 
-    user_text = update.message.text
-    await update.message.reply_text("קיבלתי. מבצע חיפוש סמנטי במאגר... 🤖")
-    
-    candidate_tools = find_candidates_with_vector_search(user_text)
-    recommended_tool_names = rerank_candidates_semantically(candidate_tools, user_text)
-    
-    if recommended_tool_names:
-        await update.message.reply_text("✨ אלו הכלים שמצאתי שהכי מתאימים לבקשה שלך:")
-        for tool_name in recommended_tool_names:
-            tool = find_tool_by_name(tool_name)
+async def get_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if VECTOR_INDEX is None:
+        await update.message.reply_text("המאגר בתחזוקה. נסה מאוחר יותר.")
+        return ConversationHandler.END
+
+    query = update.message.text
+    await update.message.reply_text("⏳ מחפש…")
+
+    cands = find_candidates(query)
+    best  = rerank(cands, query)
+
+    if best:
+        for n in best:
+            tool = find_tool(n)
             if tool:
-                await send_tool_recommendation(update, context, tool)
+                kb = [[InlineKeyboardButton("💰 בדוק מחיר", callback_data=f"price:{tool['name']}")]]
+                txt = (f"*{tool['name']}*\n{tool.get('description','')}\n"
+                       f"[🔗 קישור]({tool.get('url','#')})")
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=txt,
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(kb),
+                )
     else:
-        await update.message.reply_text("מצטער, לא מצאתי התאמה טובה במאגר שלי.")
-    
-    return await start(update, context)
-    
-# ... (Other handlers like start, choose_action, price_check, etc., are here)
-# This is a placeholder for the full code.
+        await update.message.reply_text("לא מצאתי התאמה טובה 🙁")
 
-def find_tool_by_name(name: str) -> dict | None:
-    for tool in tools_db:
-        if tool['name'].lower() == name.lower():
-            return tool
-    return None
+    return GET_RECOMMENDATION_INPUT
 
-async def send_tool_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE, tool: dict):
-    keyboard = [[InlineKeyboardButton("💰 בדוק מחיר עדכני", callback_data=f"price_check:{tool['name']}")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    message_text = f"🧠 ***{tool['name']}***\n*{tool.get('description', 'No description available.')}*\n🔗 [קישור לכלי]({tool.get('url', '#')})\n"
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=message_text, parse_mode='Markdown', reply_markup=reply_markup)
+async def stats_command(update: Update, _: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) == ADMIN_ID:
+        await update.message.reply_text(f"Loaded tools: {len(TOOLS_DB)}")
 
-async def price_check_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # ... (code for price check)
-    pass
+async def price_callback(update: Update, _: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer("Price check coming soon…")
 
-async def back_to_tool_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # ... (code for back button)
-    pass
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # ... (code for start)
-    pass
-
-async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # ... (code for choose_action)
-    pass
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # ... (code for stats)
-    pass
-
+# ────────────────── Keep-alive Flask
 flask_app = Flask(__name__)
-@flask_app.route('/')
-def health_check():
-    return "Bot is alive and kicking!"
+@flask_app.route("/")
+def health():
+    return "OK"
 
-def run_flask_app():
-    port = int(os.environ.get("PORT", 8080))
-    flask_app.run(host='0.0.0.0', port=port)
+def run_flask():
+    flask_app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
 
+# ────────────────── Main
 def main() -> None:
     load_all_data()
-
     if not BOT_TOKEN:
-        logger.critical("BOT_TOKEN environment variable not set. Exiting.")
+        logger.critical("No BOT_TOKEN env var.")
         return
 
-    keep_alive_thread = threading.Thread(target=run_flask_app, daemon=True)
-    keep_alive_thread.start()
-    
-    application = Application.builder().token(BOT_TOKEN).build()
+    threading.Thread(target=run_flask, daemon=True).start()
 
-    conv_handler = ConversationHandler(
+    app = Application.builder().token(BOT_TOKEN).build()
+    conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
-        states={
-            CHOOSE_ACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_action)],
-            GET_RECOMMENDATION_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_recommendation)],
-        },
+        states={GET_RECOMMENDATION_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_recommendation)]},
         fallbacks=[CommandHandler("start", start)],
     )
+    app.add_handler(conv)
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CallbackQueryHandler(price_callback, pattern=r"^price:"))
 
-    application.add_handler(conv_handler)
-    application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CallbackQueryHandler(price_check_callback, pattern=r"^price_check:"))
-    application.add_handler(CallbackQueryHandler(back_to_tool_callback, pattern=r"^back_to_tool:"))
-    
-    logger.info("Starting Telegram bot polling...")
-    application.run_polling()
+    logger.info("Polling…")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
