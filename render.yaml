@@ -1,8 +1,9 @@
 services:
+  # The main bot that talks to users
   - type: web
-    name: smart-tools-telegram-bot
+    name: smart-tools-bot
     env: python
-    plan: free
+    plan: starter # Or any paid plan
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python main.py"
     healthCheckPath: /
@@ -13,6 +14,6 @@ services:
           name: .env
           path: .env
     disks:
-      - name: bot-data
+      - name: bot-data-disk
         mountPath: /var/data
-        sizeGB: 1
+        sizeGB: 2
