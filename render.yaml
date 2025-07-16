@@ -1,41 +1,37 @@
 services:
+  # The main bot that talks to users
   - type: web
-    name: my-bot
+    name: smart-tools-bot
     env: python
-    plan: starter          # ← לא free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python main.py
+    plan: starter # Or any paid plan
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python main.py"
     healthCheckPath: /
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.4
-      - key: TELEGRAM_BOT_TOKEN
-        value: ""   # תמלא בדשבורד
-      - key: MONGO_URI
-        value: ""
-      - key: ADMIN_ID
-        value: ""
-    disk:
-      name: bot-data-disk
-      mountPath: /var/data
-      sizeGB: 2
+      - fromSecretFile:
+          name: .env
+          path: .env
+    disks:
+      - name: bot-data-disk
+        mountPath: /var/data
+        sizeGB: 1
 
+  # The one-time worker to build the index
   - type: worker
     name: build-index-worker
     env: python
-    plan: starter          # כבר היה Starter, משאיר
-    buildCommand: pip install -r requirements.txt
-    startCommand: python create_embeddings.py
+    plan: starter # Use a paid plan to ensure enough memory
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python create_embeddings.py"
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.4
-      - key: TELEGRAM_BOT_TOKEN
-        value: ""
-      - key: MONGO_URI
-        value: ""
-      - key: ADMIN_ID
-        value: ""
-    disk:
-      name: bot-data-disk   # אפשר אותו דיסק כדי לשתף נתונים
-      mountPath: /var/data
-      sizeGB: 2
+      - fromSecretFile: # The worker also needs the secrets
+          name: .env
+          path: .env
+    disks:
+      - name: bot-data-disk
+        mountPath: /var/data
+        sizeGB: 1
