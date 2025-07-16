@@ -49,6 +49,9 @@ vector_index = None
 index_to_name = {}
 embedding_model = None
 
+# --- Define states for conversation using integers for robustness ---
+CHOOSE_ACTION, GET_RECOMMENDATION_INPUT = range(2)
+
 # ==============================================================================
 # ===== Cloud-Based Index Creation Functionality =====
 # ==============================================================================
@@ -62,12 +65,9 @@ def create_and_save_embeddings(tools_file, index_file, mapping_file):
         logger.error(f"Error: {tools_file} not found.")
         return False, "tools.json not found."
 
-    # === התיקון כאן: ודא שהתיקייה קיימת לפני הכתיבה ===
-    try:
-        os.makedirs(DATA_PATH, exist_ok=True)
-    except OSError as e:
-        logger.error(f"Could not create data directory {DATA_PATH}: {e}")
-        return False, f"Permission error creating directory: {e}"
+    # Render's persistent disk is mounted at DATA_PATH, so the directory should exist.
+    # We ensure it exists just in case, this is safer.
+    os.makedirs(DATA_PATH, exist_ok=True)
 
     texts_to_embed = [f"שם: {t.get('name', '')}. קטגוריה: {t.get('category', '')}. תיאור: {t.get('description', '')}" for t in tools]
     tool_names = [t['name'] for t in tools]
@@ -124,13 +124,14 @@ def load_all_data():
 
         with open(MAPPING_PATH, 'r', encoding='utf-8') as f:
             index_to_name = json.load(f)
+            # JSON keys are strings, convert them back to int for Faiss mapping
             index_to_name = {int(k): v for k, v in index_to_name.items()}
         
         logger.info("All data loaded successfully.")
     except Exception as e:
         logger.warning(f"Could not load data files: {e}. The bot might not function correctly.")
         logger.warning("Use the /rebuild_index command as admin to create the necessary files.")
-        vector_index = None # Ensure it's None if loading fails
+        vector_index = None
     
 def get_embedding_model():
     global embedding_model
@@ -150,8 +151,8 @@ def find_candidates_with_vector_search(user_query: str, k=15) -> list:
     
     try:
         _, indices = vector_index.search(query_embedding, k)
-        candidate_names = [index_to_name.get(str(i)) for i in indices[0]] # Keys from JSON are strings
-        return [tool for tool in tools_db if tool['name'] in candidate_names]
+        candidate_names = [index_to_name.get(i) for i in indices[0]]
+        return [tool for tool in tools_db if tool and tool.get('name') in candidate_names]
     except Exception as e:
         logger.error(f"Error during Faiss search: {e}")
         return []
@@ -196,7 +197,6 @@ async def get_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     return await start(update, context)
 
-# --- Other handlers and main setup ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.message.from_user
     logger.info(f"User {user.first_name} (ID: {user.id}) started the bot.")
