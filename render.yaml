@@ -12,3 +12,7 @@ services:
       - fromSecretFile:
           name: .env
           path: .env
+    disks:
+      - name: bot-data
+        mountPath: /var/data
+        sizeGB: 1
