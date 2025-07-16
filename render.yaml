@@ -2,7 +2,7 @@ services:
   - type: web
     name: smart-tools-bot
     env: python
-    plan: free # Start with free, upgrade only for the rebuild
+    plan: free
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python main.py"
     healthCheckPath: /
@@ -12,7 +12,3 @@ services:
       - fromSecretFile:
           name: .env
           path: .env
-    disk:
-      name: bot-data-disk
-      mountPath: /var/data
-      sizeGB: 1
