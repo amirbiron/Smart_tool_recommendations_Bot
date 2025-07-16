@@ -185,6 +185,7 @@ async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     return CHOOSE_ACTION
 
 async def get_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    logger.info("--- Entering get_recommendation (v19) ---")
     user_text = update.message.text
     context.user_data['last_query'] = user_text
     await update.message.reply_text("קיבלתי. מנתח את הבקשה שלך מול המאגר שלי... 🤖")
@@ -192,14 +193,17 @@ async def get_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE)
     recommended_tool_names = get_semantic_recommendation(user_text)
     
     if recommended_tool_names:
+        logger.info(f"Found {len(recommended_tool_names)} local recommendations.")
         await update.message.reply_text("✨ אלו הכלים שמצאתי שהכי מתאימים לבקשה שלך:")
         for tool_name in recommended_tool_names:
             tool = find_tool_by_name(tool_name)
             if tool:
                 await send_tool_recommendation(update, context, tool)
     else:
+        logger.info("No local recommendations found.")
         await update.message.reply_text("לא מצאתי התאמה טובה במאגר שלי.")
 
+    logger.info("Now, offering web search option.")
     reply_keyboard = [["🌐 חפש ברשת"], ["🏠 חזרה לתפריט הראשי"]]
     await update.message.reply_text(
         "תרצה שאבצע חיפוש רחב יותר ברשת?",
