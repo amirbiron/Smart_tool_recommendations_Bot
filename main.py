@@ -14,7 +14,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
     ConversationHandler,
-    CallbackQueryHandler, # New import for buttons
+    CallbackQueryHandler,
 )
 from groq import Groq
 from pymongo import MongoClient
@@ -62,7 +62,6 @@ def get_keywords_from_groq(user_text: str) -> list:
     try:
         if not GROQ_API_KEY: return []
         client = Groq(api_key=GROQ_API_KEY)
-        # ... (rest of the function is the same)
         chat_completion = client.chat.completions.create(
             messages=[
                 {"role": "system", "content": "You are an expert in keyword extraction. Respond ONLY with a valid JSON object: {\"keywords\": [\"keyword1\", \"keyword2\"]}. The keywords should be in Hebrew."},
@@ -78,9 +77,6 @@ def get_keywords_from_groq(user_text: str) -> list:
         logger.error(f"Error in get_keywords_from_groq: {e}")
         return []
 
-# ==============================================================================
-# ===== פונקציה חדשה לבדיקת מחיר עדכני =====
-# ==============================================================================
 def get_price_from_groq(tool_name: str) -> str:
     """Gets the current pricing for a specific tool using Groq."""
     logger.info(f"Fetching price for tool: {tool_name}")
@@ -130,15 +126,14 @@ async def send_tool_recommendation(update: Update, context: ContextTypes.DEFAULT
     message += f"*{tool.get('description', 'No description available.')}*\n"
     message += f"🔗 [קישור לכלי]({tool.get('url', '#')})\n"
     
-    await update.message.reply_text(message, parse_mode='Markdown', reply_markup=reply_markup)
+    # Using context.bot.send_message for more flexibility
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=message, parse_mode='Markdown', reply_markup=reply_markup)
 
-# ==============================================================================
-# ===== מטפל לחיצות כפתור חדש =====
-# ==============================================================================
+
 async def price_check_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles the 'Check Price' button click."""
     query = update.callback_query
-    await query.answer() # Acknowledge the button press
+    await query.answer()
     
     tool_name = query.data.split(':', 1)[1]
     
@@ -150,7 +145,6 @@ async def price_check_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # ... (same as before)
     user = update.message.from_user
     logger.info(f"User {user.first_name} (ID: {user.id}) started the bot.")
     if db is not None:
@@ -174,7 +168,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return CHOOSE_ACTION
 
 async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # ... (same as before)
     user_choice = update.message.text
     if user_choice == "🧠 המלצה חכמה":
         await update.message.reply_text("מעולה! תאר לי במילים שלך איזה כלי אתה מחפש...", reply_markup=ReplyKeyboardRemove())
@@ -220,7 +213,6 @@ async def keyword_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return await start(update, context)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # ... (same as before)
     await update.message.reply_text(
         "***איך משתמשים בבוט?***\n\n"
         "🔹 **המלצה חכמה**: תאר לי מה אתה צריך, ואני אחפש במאגר שלי.\n\n"
@@ -231,7 +223,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     return await start(update, context)
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # ... (same as before)
     user_id = str(update.message.from_user.id)
     if not ADMIN_ID or user_id != ADMIN_ID: return
     if db is None:
@@ -244,7 +235,6 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         logger.error(f"Error fetching stats from MongoDB: {e}")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # ... (same as before)
     await update.message.reply_text("הפעולה בוטלה.", reply_markup=ReplyKeyboardRemove())
     return await start(update, context)
 
@@ -278,8 +268,8 @@ def main() -> None:
     )
 
     application.add_handler(conv_handler)
-    application.add_handler(stats_command)
-    # Add the new button handler
+    # === התיקון כאן ===
+    application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CallbackQueryHandler(price_check_callback, pattern=r"^price_check:"))
     
     logger.info("Starting Telegram bot polling...")
