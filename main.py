@@ -3,7 +3,7 @@ import logging
 import json
 import threading
 from dotenv import load_dotenv
-import requests # To make API calls to Google Search
+import requests
 
 from flask import Flask
 
@@ -63,11 +63,11 @@ tools_db = load_tools()
 tools_db_string = json.dumps(tools_db, ensure_ascii=False)
 
 # ==============================================================================
-# ===== New Live Web Search Functions =====
+# ===== Updated Live Web Search Function (Targeted) =====
 # ==============================================================================
 def perform_live_web_search(query: str) -> list:
-    """Performs a live search using Google Custom Search API."""
-    logger.info(f"Performing LIVE web search for: {query}")
+    """Performs a live, targeted search within allitools.dev using Google Custom Search API."""
+    logger.info(f"Performing targeted web search on allitools.dev for: {query}")
     if not GOOGLE_SEARCH_API_KEY or not CUSTOM_SEARCH_ENGINE_ID:
         logger.error("Google Search API Key or CX not provided.")
         return []
@@ -77,7 +77,9 @@ def perform_live_web_search(query: str) -> list:
         'key': GOOGLE_SEARCH_API_KEY,
         'cx': CUSTOM_SEARCH_ENGINE_ID,
         'q': query,
-        'num': 5 # Get top 5 results
+        'num': 5,
+        'siteSearch': 'allaitools.dev', # This is the key change
+        'siteSearchFilter': 'i' # Include results from the specified site
     }
     try:
         response = requests.get(url, params=params)
@@ -103,7 +105,7 @@ def summarize_search_results(results: list, original_query: str) -> str:
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a helpful tech expert who communicates in Hebrew. You will be given a user's original query and a list of Google search results. Your task is to read the search results and summarize the best 1-2 tool recommendations based ONLY on the provided text. For each tool, provide its name and a short description in Hebrew. Format the response cleanly. If the results are not relevant, say 'לא הצלחתי למצוא המלצה מתאימה בתוצאות החיפוש.'",
+                    "content": "You are a helpful tech expert who communicates in Hebrew. You will be given a user's original query and a list of Google search results from the website 'allaitools.dev'. Your task is to read the search results and summarize the best 1-2 tool recommendations based ONLY on the provided text. For each tool, provide its name and a short description in Hebrew. Format the response cleanly. If the results are not relevant, say 'לא הצלחתי למצוא המלצה מתאימה בתוצאות החיפוש.'",
                 },
                 {
                     "role": "user",
@@ -118,9 +120,7 @@ def summarize_search_results(results: list, original_query: str) -> str:
         logger.error(f"Error summarizing search results with Groq: {e}")
         return "אירעה שגיאה בעת סיכום תוצאות החיפוש."
 
-# --- Existing Functions (Semantic Search, Price Check, etc.) ---
 def get_semantic_recommendation(user_text: str) -> list:
-    # ... (code remains the same)
     logger.info("Performing semantic search...")
     try:
         if not GROQ_API_KEY: return []
@@ -143,16 +143,13 @@ def get_semantic_recommendation(user_text: str) -> list:
             temperature=0.1, max_tokens=200,
             response_format={"type": "json_object"},
         )
-        response_content = chat_completion.choices[0].message.content
-        logger.info(f"Semantic search response from Groq: {response_content}")
-        data = json.loads(response_content)
+        data = json.loads(chat_completion.choices[0].message.content)
         return data.get("best_matches", [])
     except Exception as e:
         logger.error(f"Error in get_semantic_recommendation: {e}")
         return []
 
 def get_price_from_groq(tool_name: str) -> str:
-    # ... (code remains the same)
     logger.info(f"Fetching price for tool: {tool_name}")
     try:
         if not GROQ_API_KEY: return "לא ניתן היה לבדוק את המחיר."
@@ -170,21 +167,18 @@ def get_price_from_groq(tool_name: str) -> str:
         return "אירעה שגיאה בעת בדיקת המחיר."
 
 def find_tool_by_name(name: str) -> dict | None:
-    # ... (code remains the same)
     for tool in tools_db:
         if tool['name'].lower() == name.lower():
             return tool
     return None
 
 async def send_tool_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE, tool: dict):
-    # ... (code remains the same)
     keyboard = [[InlineKeyboardButton("💰 בדוק מחיר עדכני", callback_data=f"price_check:{tool['name']}")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     message_text = f"🧠 ***{tool['name']}***\n*{tool.get('description', 'No description available.')}*\n🔗 [קישור לכלי]({tool.get('url', '#')})\n"
     await context.bot.send_message(chat_id=update.effective_chat.id, text=message_text, parse_mode='Markdown', reply_markup=reply_markup)
 
 async def price_check_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # ... (code remains the same)
     query = update.callback_query
     await query.answer()
     tool_name = query.data.split(':', 1)[1]
@@ -196,7 +190,6 @@ async def price_check_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text(text=f"💰 מידע על תמחור עבור *{tool_name}*:\n\n{price_info}", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def back_to_tool_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # ... (code remains the same)
     query = update.callback_query
     await query.answer()
     tool_name = query.data.split(':', 1)[1]
@@ -207,7 +200,6 @@ async def back_to_tool_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(text="אירעה שגיאה. לא נמצא המידע המקורי.")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # ... (code remains the same)
     user = update.message.from_user
     logger.info(f"User {user.first_name} (ID: {user.id}) started the bot.")
     if db is not None:
@@ -220,7 +212,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return CHOOSE_ACTION
 
 async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # ... (code remains the same)
     user_choice = update.message.text
     if user_choice == "🧠 המלצה חכמה":
         await update.message.reply_text("מעולה! תאר לי במילים שלך, כמה שיותר בפירוט, איזה כלי אתה מחפש...", reply_markup=ReplyKeyboardRemove())
@@ -231,11 +222,12 @@ async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     return CHOOSE_ACTION
 
 async def get_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # ... (code remains the same)
     user_text = update.message.text
     context.user_data['last_query'] = user_text
     await update.message.reply_text("קיבלתי. מנתח את הבקשה שלך מול המאגר שלי... 🤖")
+    
     recommended_tool_names = get_semantic_recommendation(user_text)
+    
     if recommended_tool_names:
         await update.message.reply_text("✨ אלו הכלים שמצאתי שהכי מתאימים לבקשה שלך:")
         for tool_name in recommended_tool_names:
@@ -244,22 +236,24 @@ async def get_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 await send_tool_recommendation(update, context, tool)
     else:
         await update.message.reply_text("לא מצאתי התאמה טובה במאגר שלי.")
-    reply_keyboard = [["🌐 בצע חיפוש חי ברשת"], ["🏠 חזרה לתפריט הראשי"]]
-    await update.message.reply_text("תרצה שאבצע חיפוש עדכני ברשת?", reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True))
+    
+    reply_keyboard = [["🌐 חפש ב-allaitools.dev"], ["🏠 חזרה לתפריט הראשי"]]
+    await update.message.reply_text(
+        "תרצה שאבצע חיפוש ממוקד במאגר הכלים של allaitools.dev?",
+        reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True)
+    )
+    
     return WEB_SEARCH_PROMPT
 
-# ==============================================================================
-# ===== Updated Web Search Handler =====
-# ==============================================================================
 async def web_search_prompt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     choice = update.message.text
-    if choice == "🌐 בצע חיפוש חי ברשת":
+    if choice == "🌐 חפש ב-allaitools.dev":
         last_query = context.user_data.get('last_query', '')
         if not last_query:
             await update.message.reply_text("אירעה שגיאה, לא זוכר מה חיפשנו. נחזור לתפריט הראשי.", reply_markup=ReplyKeyboardRemove())
             return await start(update, context)
 
-        await update.message.reply_text(f"בסדר, מבצע חיפוש חי ברשת עבור '{last_query}'...", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text(f"בסדר, מבצע חיפוש ממוקד ב-allaitools.dev עבור '{last_query}'...", reply_markup=ReplyKeyboardRemove())
         
         search_results = perform_live_web_search(last_query)
         summary = summarize_search_results(search_results, last_query)
@@ -269,7 +263,6 @@ async def web_search_prompt_handler(update: Update, context: ContextTypes.DEFAUL
     return await start(update, context)
 
 async def keyword_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # ... (code remains the same)
     keyword = update.message.text
     context.user_data['last_query'] = keyword
     await update.message.reply_text(f"מחפש כלים עם המילה '{keyword}' במאגר שלי...")
@@ -280,12 +273,16 @@ async def keyword_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(f"🔍 תוצאות חיפוש עבור '{keyword}':")
         for tool in matched_tools:
             await send_tool_recommendation(update, context, tool)
-    reply_keyboard = [["🌐 בצע חיפוש חי ברשת"], ["🏠 חזרה לתפריט הראשי"]]
-    await update.message.reply_text("תרצה שאבצע חיפוש עדכני ברשת?", reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True))
+
+    reply_keyboard = [["🌐 חפש ב-allaitools.dev"], ["🏠 חזרה לתפריט הראשי"]]
+    await update.message.reply_text(
+        "תרצה שאבצע חיפוש ממוקד במאגר הכלים של allaitools.dev?",
+        reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True)
+    )
+
     return WEB_SEARCH_PROMPT
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # ... (code remains the same)
     user_id = str(update.message.from_user.id)
     if not ADMIN_ID or user_id != ADMIN_ID: return
     if db is None:
@@ -297,7 +294,6 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except Exception as e:
         logger.error(f"Error fetching stats from MongoDB: {e}")
 
-# --- Flask and Main App Setup (remains the same) ---
 flask_app = Flask(__name__)
 @flask_app.route('/')
 def health_check():
@@ -324,7 +320,7 @@ def main() -> None:
             GET_RECOMMENDATION_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_recommendation)],
             GET_KEYWORD_SEARCH_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, keyword_search)],
             WEB_SEARCH_PROMPT: [
-                MessageHandler(filters.Regex("^🌐 בצע חיפוש חי ברשת$"), web_search_prompt_handler),
+                MessageHandler(filters.Regex("^🌐 חפש ב-allaitools.dev$"), web_search_prompt_handler),
                 MessageHandler(filters.Regex("^🏠 חזרה לתפריט הראשי$"), start),
             ]
         },
