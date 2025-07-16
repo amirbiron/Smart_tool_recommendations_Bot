@@ -1,62 +1,67 @@
+# Step 1: Install necessary libraries
+!pip install sentence-transformers faiss-cpu
+
+# Step 2: Import libraries
 import json
+import os
 import numpy as np
 import faiss
 from sentence_transformers import SentenceTransformer
 
-def create_and_save_embeddings(tools_file='tools.json', index_file='tools.faiss', mapping_file='index_to_name.json'):
+# Step 3: Define file paths
+# Note: We are running this in Colab, so we don't need a persistent data path.
+# The files will be created in the current temporary directory.
+TOOLS_JSON_PATH = 'tools.json'
+FAISS_INDEX_PATH = 'tools.faiss'
+MAPPING_PATH = 'index_to_name.json'
+
+def create_and_save_embeddings():
     """
-    Reads the tools database, creates vector embeddings for each tool's description,
-    and saves them into a Faiss index and a mapping file.
-    This script needs to be run only once, or whenever tools.json is updated.
+    Reads the tools database, creates vector embeddings, and saves them.
+    This script is run as a one-off job in Google Colab.
     """
-    print("Loading tools from tools.json...")
-    try:
-        with open(tools_file, 'r', encoding='utf-8') as f:
-            tools = json.load(f)
-    except FileNotFoundError:
-        print(f"Error: {tools_file} not found. Please make sure it's in the same directory.")
+    print("Starting embedding creation process...")
+    
+    # Ensure tools.json exists
+    if not os.path.exists(TOOLS_JSON_PATH):
+        print(f"Error: {TOOLS_JSON_PATH} not found.")
+        print("Please upload your 'tools.json' file to the Colab session using the file browser on the left.")
         return
 
-    # We will create embeddings based on a combination of important fields.
-    # This gives a richer context than just the description.
-    print("Preparing text for embedding...")
-    texts_to_embed = []
-    tool_names = []
-    for tool in tools:
-        # Combine name, category, and description for a richer embedding
-        combined_text = f"שם: {tool.get('name', '')}. קטגוריה: {tool.get('category', '')}. תיאור: {tool.get('description', '')}"
-        texts_to_embed.append(combined_text)
-        tool_names.append(tool['name'])
+    try:
+        with open(TOOLS_JSON_PATH, 'r', encoding='utf-8') as f:
+            tools = json.load(f)
+        print(f"Successfully loaded {len(tools)} tools from {TOOLS_JSON_PATH}.")
+    except Exception as e:
+        print(f"Error reading or parsing {TOOLS_JSON_PATH}: {e}")
+        return
+
+    # Prepare the text for each tool for embedding
+    texts_to_embed = [f"שם: {t.get('name', '')}. קטגוריה: {t.get('category', '')}. תיאור: {t.get('description', '')}" for t in tools]
+    tool_names = [t['name'] for t in tools]
 
     print("Loading sentence-transformer model (all-MiniLM-L6-v2)... This may take a moment.")
-    # Using a small but powerful model for creating embeddings.
     model = SentenceTransformer('all-MiniLM-L6-v2')
 
-    print("Creating embeddings for all tools... This may take a few minutes.")
+    print(f"Creating embeddings for {len(texts_to_embed)} tools... This is the longest step.")
     embeddings = model.encode(texts_to_embed, show_progress_bar=True)
-
-    # Faiss requires the embeddings to be in a specific format (float32)
     embeddings = np.array(embeddings).astype('float32')
     
-    # The dimension of our vectors
-    d = embeddings.shape[1]
-
-    print(f"Creating a Faiss index with dimension {d}...")
-    index = faiss.IndexFlatL2(d)
+    # Create and populate the Faiss index
+    index = faiss.IndexFlatL2(embeddings.shape[1])
     index.add(embeddings)
 
-    print(f"Saving Faiss index to {index_file}...")
-    faiss.write_index(index, index_file)
+    print(f"Saving Faiss index to {FAISS_INDEX_PATH}...")
+    faiss.write_index(index, FAISS_INDEX_PATH)
 
-    print(f"Creating and saving index-to-name mapping to {mapping_file}...")
-    # This mapping helps us know which tool corresponds to which vector in the index
+    print(f"Saving index-to-name mapping to {MAPPING_PATH}...")
     index_to_name = {i: name for i, name in enumerate(tool_names)}
-    with open(mapping_file, 'w', encoding='utf-8') as f:
+    with open(MAPPING_PATH, 'w', encoding='utf-8') as f:
         json.dump(index_to_name, f, ensure_ascii=False, indent=2)
 
-    print("\nPreparation complete!")
-    print(f"'{index_file}' and '{mapping_file}' have been created successfully.")
-    print("You can now run the main bot script.")
+    print("\n✅ Preparation complete!")
+    print(f"'{FAISS_INDEX_PATH}' and '{MAPPING_PATH}' have been created successfully.")
+    print("You can now download these two files from the file browser on the left.")
 
-if __name__ == '__main__':
-    create_and_save_embeddings()
+# Step 4: Run the function
+create_and_save_embeddings()
